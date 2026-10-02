@@ -15,7 +15,7 @@ ENV VITE_SHOW_FLIGHT_OPERATIONS=${VITE_SHOW_FLIGHT_OPERATIONS}
 RUN npm run build -w web
 
 # ---- Serve with unprivileged nginx and proxy /api to Spring Boot ----
-FROM nginxinc/nginx-unprivileged:1.29-alpine AS runtime
+FROM nginxinc/nginx-unprivileged:1.31-alpine AS runtime
 
 # Rendered by the image entrypoint with envsubst (API_UPSTREAM).
 COPY web/nginx/default.conf.template /etc/nginx/templates/default.conf.template
