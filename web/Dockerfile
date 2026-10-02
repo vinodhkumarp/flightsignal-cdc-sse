@@ -2,7 +2,7 @@
 # Build context: repository root (npm workspaces share the root lockfile).
 
 # ---- Build the static bundle ----
-FROM node:24-alpine AS build
+FROM node:26-alpine AS build
 WORKDIR /app
 
 COPY package.json package-lock.json ./
