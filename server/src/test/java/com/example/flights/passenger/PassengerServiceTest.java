@@ -10,6 +10,7 @@ import java.util.concurrent.atomic.AtomicReference;
 import org.junit.jupiter.api.Test;
 
 import com.example.flights.api.ApiException;
+import com.example.flights.security.StationScope;
 
 class PassengerServiceTest {
 
@@ -18,7 +19,7 @@ class PassengerServiceTest {
         var captured = new AtomicReference<PassengerSearchCriteria>();
         var repository = new PassengerRepository(null) {
             @Override
-            public List<Passenger> search(PassengerSearchCriteria criteria) {
+            public List<Passenger> search(PassengerSearchCriteria criteria, StationScope scope) {
                 captured.set(criteria);
                 return List.of();
             }
@@ -31,7 +32,8 @@ class PassengerServiceTest {
                 "syd",
                 "lax",
                 "amelia nguyen",
-                "ab12cd");
+                "ab12cd",
+                StationScope.allStations());
 
         assertThat(result.count()).isZero();
         assertThat(captured.get()).isEqualTo(new PassengerSearchCriteria(
@@ -53,7 +55,8 @@ class PassengerServiceTest {
                 null,
                 null,
                 null,
-                null))
+                null,
+                StationScope.allStations()))
                 .isInstanceOf(ApiException.class)
                 .hasMessage("flightNumber is required.");
     }

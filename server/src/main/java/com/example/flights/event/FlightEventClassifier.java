@@ -3,6 +3,7 @@ package com.example.flights.event;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Objects;
@@ -36,7 +37,7 @@ public class FlightEventClassifier {
                     "info",
                     "Flight " + label + " from " + flight.originAirport()
                             + " to " + flight.destinationAirport()
-                            + " has been added.",
+                            + via(flight) + " has been added.",
                     null);
         }
 
@@ -148,6 +149,19 @@ public class FlightEventClassifier {
                     null);
         }
 
+        if (!Objects.equals(previous.routeStations(), current.routeStations())) {
+            return event(
+                    databaseEvent,
+                    current,
+                    previous,
+                    changes,
+                    "flight.route.changed",
+                    "warning",
+                    "Route for " + label + " changed to " + route(current)
+                            + " (was " + route(previous) + ").",
+                    null);
+        }
+
         if (!Objects.equals(previous.gate(), current.gate())) {
             return event(
                     databaseEvent,
@@ -213,6 +227,11 @@ public class FlightEventClassifier {
             notes.add("Status is now " + statusText(current.status()) + ".");
         }
 
+        var onward = onwardStations(primary.stations(), previous, current);
+        if (!onward.isEmpty()) {
+            notes.add("Onward connections at " + String.join(", ", onward) + " may be affected.");
+        }
+
         if (notes.isEmpty()) {
             return primary;
         }
@@ -227,7 +246,38 @@ public class FlightEventClassifier {
                 primary.type(),
                 primary.severity(),
                 primary.message() + " " + String.join(" ", notes),
-                primary.delay());
+                primary.delay(),
+                primary.stations());
+    }
+
+    /**
+     * Stations the database added to the event beyond this leg's own route,
+     * i.e. later legs of the same flight alerted because of a delay or
+     * cancellation.
+     */
+    private static List<String> onwardStations(
+            List<String> eventStations,
+            Flight previous,
+            Flight current) {
+        var own = new HashSet<String>(previous.routeStations());
+        own.addAll(current.routeStations());
+        return eventStations.stream()
+                .filter(station -> !own.contains(station))
+                .sorted()
+                .toList();
+    }
+
+    private static String route(Flight flight) {
+        return String.join(" → ", flight.routeStations());
+    }
+
+    /** " via SIN" for multi-stop journeys, otherwise empty. */
+    private static String via(Flight flight) {
+        var route = flight.routeStations();
+        if (route == null || route.size() <= 2) {
+            return "";
+        }
+        return " via " + String.join(", ", route.subList(1, route.size() - 1));
     }
 
     private static String statusSentence(String label, String status) {
@@ -260,6 +310,7 @@ public class FlightEventClassifier {
                 previous.scheduledDepartureUtc(),
                 current.scheduledDepartureUtc());
         addChange(changes, "gate", previous.gate(), current.gate());
+        addChange(changes, "routeStations", previous.routeStations(), current.routeStations());
         addChange(
                 changes,
                 "estimatedArrivalUtc",
@@ -313,7 +364,8 @@ public class FlightEventClassifier {
                 type,
                 severity,
                 message,
-                delay);
+                delay,
+                row.stations());
     }
 
     private static Instant effectiveDeparture(Flight flight) {

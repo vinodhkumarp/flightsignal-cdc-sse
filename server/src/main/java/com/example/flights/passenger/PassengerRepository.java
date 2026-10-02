@@ -11,6 +11,8 @@ import org.springframework.jdbc.core.namedparam.MapSqlParameterSource;
 import org.springframework.jdbc.core.namedparam.NamedParameterJdbcTemplate;
 import org.springframework.stereotype.Repository;
 
+import com.example.flights.security.StationScope;
+
 @Repository
 public class PassengerRepository {
 
@@ -34,7 +36,13 @@ public class PassengerRepository {
         this.jdbc = jdbc;
     }
 
-    public List<Passenger> search(PassengerSearchCriteria criteria) {
+    /**
+     * Searches a manifest, limited to flights touching the caller's stations.
+     * A passenger is visible when the live flight's route overlaps the scope,
+     * or - after the flight row was deleted - when their own segment's origin
+     * or destination does.
+     */
+    public List<Passenger> search(PassengerSearchCriteria criteria, StationScope scope) {
         // Compare (carrier_code, flight_number) pairs instead of a concatenated
         // expression so the flight search index can be used.
         var sql = new StringBuilder(SELECT_PASSENGERS)
@@ -65,6 +73,15 @@ public class PassengerRepository {
             parameters.addValue(
                     "bookingReference",
                     criteria.bookingReference());
+        }
+
+        if (!scope.all()) {
+            sql.append(" AND (ARRAY[trim(origin_airport), trim(destination_airport)]::text[]")
+                    .append(" && string_to_array(:scopeStations, ',')")
+                    .append(" OR EXISTS (SELECT 1 FROM public.flight_instance flight")
+                    .append(" WHERE flight.flight_id = flight_passenger.flight_id")
+                    .append(" AND flight.route_stations && string_to_array(:scopeStations, ',')))");
+            parameters.addValue("scopeStations", scope.sqlList());
         }
 
         sql.append(" ORDER BY family_name, given_name, manifest_sequence LIMIT 200");

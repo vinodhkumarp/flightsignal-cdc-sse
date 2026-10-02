@@ -8,6 +8,8 @@ import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 
+import com.example.flights.security.StationScope;
+
 @RestController
 @RequestMapping("/api/passengers")
 public class PassengerController {
@@ -27,13 +29,15 @@ public class PassengerController {
             @RequestParam(required = false) String originAirport,
             @RequestParam(required = false) String destinationAirport,
             @RequestParam(required = false) String passengerName,
-            @RequestParam(required = false) String bookingReference) {
+            @RequestParam(required = false) String bookingReference,
+            StationScope scope) {
         return service.search(
                 flightNumber,
                 travelDate,
                 originAirport,
                 destinationAirport,
                 passengerName,
-                bookingReference);
+                bookingReference,
+                scope);
     }
 }

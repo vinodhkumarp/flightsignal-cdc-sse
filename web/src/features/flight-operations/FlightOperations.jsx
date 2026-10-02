@@ -65,6 +65,7 @@ function AddFlightForm({ onClose, onCreated }) {
     setError('');
 
     try {
+      // Multi-leg flights are added one leg at a time (same flight number).
       await api('/api/flights', {
         method: 'POST',
         body: JSON.stringify({
@@ -274,6 +275,7 @@ function FlightRow({ flight, busy, onDelay, onCancel, onRemove }) {
           <span className="route__line" aria-hidden="true" />
           <strong>{flight.destinationAirport}</strong>
         </div>
+
       </td>
       <td>
         <div className="time-cell">

@@ -1,31 +1,40 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { api } from '../api.js';
+import { api, authHeaders, notifyUnauthorized } from '../api.js';
 import { latestEventId, mergeEvents, reconnectDelay } from '../lib/events.js';
+import { openEventStream } from '../lib/sse-client.js';
 
 const HISTORY_PAGE_SIZE = 30;
 const OFFLINE_AFTER_ATTEMPTS = 3;
 
+function withStations(path, stations) {
+  if (!stations || stations.length === 0) {
+    return path;
+  }
+  const separator = path.includes('?') ? '&' : '?';
+  return `${path}${separator}stations=${encodeURIComponent(stations.join(','))}`;
+}
+
 /**
- * Loads notification history and keeps it current over Server-Sent Events.
+ * Loads notification history and keeps it current over Server-Sent Events,
+ * for the signed-in user's stations (optionally narrowed by `stations`).
+ *
+ * Every request, including the stream, carries the user's JWT. The API
+ * filters by the stations in that token, so this hook never receives
+ * another station's flights.
  *
  * Connection lifecycle:
- *  1. Load the newest history page. If that fails, retry with backoff; the
- *     stream is never opened without a cursor, so old events are never
- *     replayed as if they were new.
- *  2. Open `/api/events/stream?after=<newest loaded id>`. The browser
- *     reconnects transient drops itself and sends `Last-Event-ID`.
- *  3. If the browser gives up (EventSource CLOSED, e.g. the API returned
- *     502/503), reconnect manually with exponential backoff.
- *  4. On a `reset` event (too many missed events to replay) reload history.
+ *  1. Load the newest history page (retrying with backoff on failure). The
+ *     stream is never opened without a cursor.
+ *  2. Open `/api/events/stream?after=<newest id>` with a fresh token.
+ *  3. Whenever the stream ends (network drop, server restart, token expiry)
+ *     reconnect with backoff and a fresh token, resuming from the newest ID.
+ *  4. 401 hands control back to the auth layer; 403 stops (no access).
+ *  5. On a `reset` event (too many missed events) reload history.
  *
- * Events already shown (replays after a reconnect) are merged silently and
- * never re-trigger a live notification.
- *
- * @param options.onLiveEvent called once for every new live event
- * @returns connection state, events (newest first), the latest live event,
- *          and pagination helpers.
+ * The caller should remount the component using this hook (via `key`) when
+ * the station filter changes, which starts a clean list.
  */
-export function useFlightEvents({ onLiveEvent } = {}) {
+export function useFlightEvents({ stations = null, onLiveEvent } = {}) {
   const [events, setEvents] = useState([]);
   const [connection, setConnection] = useState('connecting');
   const [latestLiveEvent, setLatestLiveEvent] = useState(null);
@@ -35,14 +44,14 @@ export function useFlightEvents({ onLiveEvent } = {}) {
   const [historyError, setHistoryError] = useState('');
 
   const knownIds = useRef(new Set());
+  const cursor = useRef(null);
+  const historyLoaded = useRef(false);
   const onLiveEventRef = useRef(onLiveEvent);
+  const stationsKey = stations?.join(',') ?? '';
 
   useEffect(() => {
     onLiveEventRef.current = onLiveEvent;
   }, [onLiveEvent]);
-
-  const cursor = useRef(null);
-  const historyLoaded = useRef(false);
 
   const rememberEvents = useCallback((incoming) => {
     for (const event of incoming) {
@@ -52,7 +61,8 @@ export function useFlightEvents({ onLiveEvent } = {}) {
   }, []);
 
   const loadHistory = useCallback(async () => {
-    const page = await api(`/api/events?limit=${HISTORY_PAGE_SIZE}`);
+    const filter = stationsKey ? stationsKey.split(',') : null;
+    const page = await api(withStations(`/api/events?limit=${HISTORY_PAGE_SIZE}`, filter));
     rememberEvents(page.events);
     setEvents((current) => mergeEvents(current, page.events));
     if (!historyLoaded.current) {
@@ -61,13 +71,15 @@ export function useFlightEvents({ onLiveEvent } = {}) {
     }
     historyLoaded.current = true;
     setHistoryError('');
-  }, [rememberEvents]);
+  }, [rememberEvents, stationsKey]);
 
   useEffect(() => {
     let disposed = false;
-    let eventSource = null;
+    let stream = null;
     let retryTimer = null;
     let attempt = 0;
+    let live = false;
+    const filter = stationsKey ? stationsKey.split(',') : null;
 
     function scheduleReconnect() {
       if (disposed) {
@@ -79,10 +91,10 @@ export function useFlightEvents({ onLiveEvent } = {}) {
       attempt += 1;
     }
 
-    function handleFlightChange(message) {
+    function handleFlightChange(data) {
       let event;
       try {
-        event = JSON.parse(message.data);
+        event = JSON.parse(data);
       } catch {
         return;
       }
@@ -99,32 +111,44 @@ export function useFlightEvents({ onLiveEvent } = {}) {
       onLiveEventRef.current?.(event);
     }
 
-    function openStream() {
-      eventSource?.close();
-      eventSource = new EventSource(`/api/events/stream?after=${cursor.current ?? 0}`);
+    function handleStreamEnd(details) {
+      live = false;
+      if (disposed) {
+        return;
+      }
+      if (details.type === 'http' && details.status === 401) {
+        notifyUnauthorized();
+        return;
+      }
+      if (details.type === 'http' && details.status === 403) {
+        setConnection('forbidden');
+        return;
+      }
+      scheduleReconnect();
+    }
 
-      eventSource.addEventListener('ready', () => {
-        attempt = 0;
-        setConnection('connected');
+    async function openStream() {
+      stream?.close();
+      const headers = await authHeaders();
+      if (disposed) {
+        return;
+      }
+      const url = withStations(`/api/events/stream?after=${cursor.current ?? 0}`, filter);
+      stream = openEventStream(url, {
+        headers,
+        onEvent: (message) => {
+          if (message.type === 'ready') {
+            attempt = 0;
+            live = true;
+            setConnection('connected');
+          } else if (message.type === 'flight-change') {
+            handleFlightChange(message.data);
+          } else if (message.type === 'reset') {
+            loadHistory().catch((error) => setHistoryError(error.message));
+          }
+        },
+        onError: handleStreamEnd
       });
-
-      eventSource.addEventListener('flight-change', handleFlightChange);
-
-      eventSource.addEventListener('reset', () => {
-        loadHistory().catch((error) => setHistoryError(error.message));
-      });
-
-      eventSource.onerror = () => {
-        if (disposed) {
-          return;
-        }
-        if (eventSource.readyState === EventSource.CLOSED) {
-          eventSource.close();
-          scheduleReconnect();
-        } else {
-          setConnection('reconnecting');
-        }
-      };
     }
 
     async function connect() {
@@ -136,21 +160,28 @@ export function useFlightEvents({ onLiveEvent } = {}) {
         try {
           await loadHistory();
         } catch (error) {
-          if (!disposed) {
-            setHistoryError(error.message);
-            scheduleReconnect();
+          if (disposed) {
+            return;
           }
+          if (error.status === 401) {
+            return;
+          }
+          if (error.status === 403) {
+            setHistoryError(error.message);
+            setConnection('forbidden');
+            return;
+          }
+          setHistoryError(error.message);
+          scheduleReconnect();
           return;
         }
       }
 
-      if (!disposed) {
-        openStream();
-      }
+      await openStream();
     }
 
     function reconnectNow() {
-      if (eventSource?.readyState !== EventSource.OPEN) {
+      if (!live) {
         attempt = 0;
         window.clearTimeout(retryTimer);
         connect();
@@ -164,9 +195,9 @@ export function useFlightEvents({ onLiveEvent } = {}) {
       disposed = true;
       window.clearTimeout(retryTimer);
       window.removeEventListener('online', reconnectNow);
-      eventSource?.close();
+      stream?.close();
     };
-  }, [loadHistory]);
+  }, [loadHistory, stationsKey]);
 
   const loadOlder = useCallback(async () => {
     if (!hasMore || !nextCursor || loadingOlder) {
@@ -175,9 +206,11 @@ export function useFlightEvents({ onLiveEvent } = {}) {
 
     setLoadingOlder(true);
     try {
-      const page = await api(
-        `/api/events?limit=${HISTORY_PAGE_SIZE}&before=${encodeURIComponent(nextCursor)}`
-      );
+      const filter = stationsKey ? stationsKey.split(',') : null;
+      const page = await api(withStations(
+        `/api/events?limit=${HISTORY_PAGE_SIZE}&before=${encodeURIComponent(nextCursor)}`,
+        filter
+      ));
       rememberEvents(page.events);
       setEvents((current) => mergeEvents(current, page.events));
       setNextCursor(page.nextCursor);
@@ -187,7 +220,7 @@ export function useFlightEvents({ onLiveEvent } = {}) {
     } finally {
       setLoadingOlder(false);
     }
-  }, [hasMore, loadingOlder, nextCursor, rememberEvents]);
+  }, [hasMore, loadingOlder, nextCursor, rememberEvents, stationsKey]);
 
   const dismissLatestEvent = useCallback(() => setLatestLiveEvent(null), []);
 

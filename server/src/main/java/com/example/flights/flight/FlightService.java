@@ -6,11 +6,13 @@ import static com.example.flights.flight.FlightRules.require;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.UUID;
+import java.util.stream.Stream;
 
 import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Service;
 
 import com.example.flights.api.ApiException;
+import com.example.flights.security.StationScope;
 
 @Service
 public class FlightService {
@@ -21,11 +23,14 @@ public class FlightService {
         this.repository = repository;
     }
 
-    public List<Flight> findAll() {
-        return repository.findAll();
+    public List<Flight> findAll(StationScope scope) {
+        return repository.findAll(scope);
     }
 
-    public Flight create(CreateFlightRequest request) {
+    /**
+     * Creates a flight. The caller must cover at least one of its stations.
+     */
+    public Flight create(CreateFlightRequest request, StationScope scope) {
         require(request != null, "Flight details are required.");
 
         var origin = FlightRules.airport("originAirport").apply(request.originAirport());
@@ -40,6 +45,11 @@ public class FlightService {
                 "scheduledArrivalUtc is required.");
         require(request.scheduledArrivalUtc().isAfter(request.scheduledDepartureUtc()),
                 "scheduledArrivalUtc must be after scheduledDepartureUtc.");
+
+        var route = FlightRules.routeStations(request.routeStations());
+        require(route == null || (route.contains(origin) && route.contains(destination)),
+                "routeStations must include originAirport and destinationAirport.");
+        requireAccess(scope, route == null ? List.of(origin, destination) : route);
 
         return repository.insert(new CreateFlightRequest(
                 FlightRules.carrier(request.carrierCode()),
@@ -61,10 +71,15 @@ public class FlightService {
                         : request.estimatedArrivalUtc(),
                 request.actualArrivalUtc(),
                 request.status() == null ? "SCHEDULED" : FlightRules.status(request.status()),
-                FlightRules.gate(request.gate())));
+                FlightRules.gate(request.gate()),
+                route));
     }
 
-    public Flight update(UUID flightId, UpdateFlightRequest request) {
+    /**
+     * Partially updates a flight with optimistic locking. The caller must
+     * cover a station of the flight's current route and of the new route.
+     */
+    public Flight update(UUID flightId, UpdateFlightRequest request, StationScope scope) {
         require(request != null, "Flight update is required.");
         require(request.version() != null && request.version() > 0,
                 "version must be a positive integer.");
@@ -98,8 +113,22 @@ public class FlightService {
         put(changes, "actualArrivalUtc", request.actualArrivalUtc());
         put(changes, "status", optional(request.status(), FlightRules::status));
         put(changes, "gate", FlightRules.gate(request.gate()));
+        var route = FlightRules.routeStations(request.routeStations());
+        put(changes, "routeStations", route);
 
         require(!changes.isEmpty(), "At least one flight field must be supplied.");
+
+        var existing = repository.findById(flightId)
+                .orElseThrow(() -> new ApiException(HttpStatus.NOT_FOUND, "Flight was not found."));
+        requireAccess(scope, existing.routeStations());
+        if (route != null || origin != null || destination != null) {
+            requireAccess(scope, Stream.of(
+                            route == null ? List.<String>of() : route,
+                            origin == null ? List.<String>of() : List.of(origin),
+                            destination == null ? List.<String>of() : List.of(destination))
+                    .flatMap(List::stream)
+                    .toList());
+        }
 
         return repository.update(flightId, request.version(), changes)
                 .orElseThrow(() -> new ApiException(
@@ -108,11 +137,22 @@ public class FlightService {
                                 + "Refresh and retry."));
     }
 
-    public Flight delete(UUID flightId) {
+    public Flight delete(UUID flightId, StationScope scope) {
+        var existing = repository.findById(flightId)
+                .orElseThrow(() -> new ApiException(HttpStatus.NOT_FOUND, "Flight was not found."));
+        requireAccess(scope, existing.routeStations());
         return repository.delete(flightId)
                 .orElseThrow(() -> new ApiException(
                         HttpStatus.NOT_FOUND,
                         "Flight was not found."));
+    }
+
+    private static void requireAccess(StationScope scope, List<String> stations) {
+        if (!scope.permits(stations)) {
+            throw new ApiException(
+                    HttpStatus.FORBIDDEN,
+                    "You do not have access to stations " + String.join(", ", stations) + ".");
+        }
     }
 
     private static void put(

@@ -33,12 +33,25 @@ spring:
   mvc:
     problemdetails:
       enabled: true
+  # JWT validation for real environments: point Spring at your SSO with
+  # environment variables (deliberately not set here), e.g.
+  #   SPRING_SECURITY_OAUTH2_RESOURCESERVER_JWT_ISSUER_URI=https://login.microsoftonline.com/<tenant>/v2.0
+  #   SPRING_SECURITY_OAUTH2_RESOURCESERVER_JWT_AUDIENCES=api://flightsignal
+  # The dev profile uses the built-in development token issuer instead.
   jackson:
     datatype:
       datetime:
         write-dates-as-timestamps: false
 
 app:
+  security:
+    # Claim holding the user's stations: array ["SYD","SIN"] or "SYD SIN".
+    # Dotted paths read nested claims (e.g. ext.stations).
+    stations-claim: ${STATIONS_CLAIM:stations}
+    all-stations-values: ["*", "ALL"]
+    name-claim: name
+    dev:
+      enabled: false
   sse:
     heartbeat: 20s
     timeout: 30m
@@ -94,13 +107,20 @@ logging:
     com.example.flights: INFO
 
 ---
-# Local development: seed demo flights/passengers and show health details.
+# Local development: seed demo flights/passengers, show health details, and
+# use the built-in development token issuer instead of SSO.
 spring:
   config:
     activate:
       on-profile: dev
   flyway:
     locations: classpath:db/migration,classpath:db/seed
+
+app:
+  security:
+    dev:
+      enabled: true
+      secret: ${DEV_TOKEN_SECRET:flightsignal-local-development-secret-change-me}
 
 management:
   endpoint:

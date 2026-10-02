@@ -1,5 +1,6 @@
 import { useEffect } from 'react';
-import { eventIcon, formatInTimezone } from '../lib/format.js';
+import { eventIcon, flightCode, formatInTimezone } from '../lib/format.js';
+import { routeLabel } from '../lib/stations.js';
 
 const TOAST_DURATION_MS = 8_000;
 
@@ -23,7 +24,9 @@ export function EventToast({ event, onDismiss }) {
         {eventIcon(event.type)}
       </div>
       <div className="toast__copy">
-        <span className="eyebrow">Live flight update</span>
+        <span className="eyebrow">
+          Live flight update{event.flight ? ` · ${flightCode(event.flight)} ${routeLabel(event.flight)}` : ''}
+        </span>
         <strong>{event.message}</strong>
         {event.delay && event.flight && (
           <span>

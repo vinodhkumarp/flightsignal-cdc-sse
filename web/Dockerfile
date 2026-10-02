@@ -11,7 +11,9 @@ RUN --mount=type=cache,target=/root/.npm npm ci --workspace web --no-audit --no-
 
 COPY web/ web/
 ARG VITE_SHOW_FLIGHT_OPERATIONS=false
-ENV VITE_SHOW_FLIGHT_OPERATIONS=${VITE_SHOW_FLIGHT_OPERATIONS}
+ARG VITE_AUTH_MODE=dev
+ENV VITE_SHOW_FLIGHT_OPERATIONS=${VITE_SHOW_FLIGHT_OPERATIONS} \
+    VITE_AUTH_MODE=${VITE_AUTH_MODE}
 RUN npm run build -w web
 
 # ---- Serve with unprivileged nginx and proxy /api to Spring Boot ----

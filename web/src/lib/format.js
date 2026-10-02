@@ -4,6 +4,7 @@ export function eventIcon(type = '') {
   if (type.includes('delayed')) return '↗';
   if (type.includes('cancelled') || type.includes('removed')) return '×';
   if (type.includes('gate')) return 'G';
+  if (type.includes('route')) return '⇄';
   if (type.includes('added')) return '+';
   return '•';
 }

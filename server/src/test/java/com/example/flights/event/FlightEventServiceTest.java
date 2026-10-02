@@ -11,6 +11,7 @@ import java.util.stream.LongStream;
 import org.junit.jupiter.api.Test;
 
 import com.example.flights.config.SseProperties;
+import com.example.flights.security.StationScope;
 
 class FlightEventServiceTest {
 
@@ -25,13 +26,13 @@ class FlightEventServiceTest {
     void returnsAKeysetPageAndUsesTheLastReturnedEventAsCursor() {
         var repository = new FlightEventRepository(null) {
             @Override
-            public List<FlightChangeRow> findPage(Long before, int limit) {
+            public List<FlightChangeRow> findPage(Long before, int limit, StationScope scope) {
                 return List.of(row(30), row(29), row(28));
             }
         };
         var service = new FlightEventService(repository, CLASSIFIER, properties(500, 20));
 
-        var page = service.findPage(null, 2);
+        var page = service.findPage(null, 2, StationScope.allStations());
 
         assertThat(page.events())
                 .extracting(FlightEvent::eventId)
@@ -45,7 +46,7 @@ class FlightEventServiceTest {
         var repository = new RangeRepository(1, 60);
         var service = new FlightEventService(repository, CLASSIFIER, properties(500, 5));
 
-        var replay = service.replayAfter(50);
+        var replay = service.replayAfter(50, StationScope.allStations());
 
         assertThat(repository.lastAfter).isEqualTo(45);
         assertThat(replay.resetRequired()).isFalse();
@@ -62,7 +63,7 @@ class FlightEventServiceTest {
                 CLASSIFIER,
                 properties(10, 5));
 
-        var replay = service.replayAfter(50);
+        var replay = service.replayAfter(50, StationScope.allStations());
 
         assertThat(replay.resetRequired()).isTrue();
         assertThat(replay.events()).isEmpty();
@@ -75,7 +76,7 @@ class FlightEventServiceTest {
                 CLASSIFIER,
                 properties(10, 0));
 
-        var replay = service.replayAfter(50);
+        var replay = service.replayAfter(50, StationScope.allStations());
 
         assertThat(replay.resetRequired()).isFalse();
         assertThat(replay.events()).hasSize(10);
@@ -106,7 +107,7 @@ class FlightEventServiceTest {
         }
 
         @Override
-        public List<FlightChangeRow> findAfter(long eventId, int limit) {
+        public List<FlightChangeRow> findAfter(long eventId, int limit, StationScope scope) {
             lastAfter = eventId;
             return LongStream.rangeClosed(Math.max(first, eventId + 1), last)
                     .limit(limit)
@@ -122,7 +123,8 @@ class FlightEventServiceTest {
                 UUID.randomUUID(),
                 "{}",
                 "{}",
-                Instant.parse("2026-10-02T01:00:00Z"));
+                Instant.parse("2026-10-02T01:00:00Z"),
+                List.of("SYD"));
     }
 
     private static FlightEvent event(FlightChangeRow row) {
@@ -136,6 +138,7 @@ class FlightEventServiceTest {
                 "flight.updated",
                 "info",
                 "Updated",
-                null);
+                null,
+                row.stations());
     }
 }

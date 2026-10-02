@@ -8,6 +8,7 @@ import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Service;
 
 import com.example.flights.api.ApiException;
+import com.example.flights.security.StationScope;
 
 @Service
 public class PassengerService {
@@ -27,7 +28,8 @@ public class PassengerService {
             String originAirport,
             String destinationAirport,
             String passengerName,
-            String bookingReference) {
+            String bookingReference,
+            StationScope scope) {
         var normalizedFlight = upperRequired(flightNumber, "flightNumber");
         require(FLIGHT_CODE.matcher(normalizedFlight).matches(),
                 "flightNumber must contain three to eleven letters or digits.");
@@ -40,7 +42,7 @@ public class PassengerService {
                 normalizeAirport(destinationAirport, "destinationAirport"),
                 upperToNull(passengerName),
                 upperToNull(bookingReference));
-        var passengers = repository.search(criteria);
+        var passengers = repository.search(criteria, scope);
         return new PassengerSearchResult(
                 passengers,
                 passengers.size(),

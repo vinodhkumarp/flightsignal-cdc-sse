@@ -26,6 +26,7 @@ public class ApiErrorHandler extends ResponseEntityExceptionHandler {
     private static final URI TYPE_VALIDATION = URI.create("urn:flightsignal:problem:validation");
     private static final URI TYPE_CONFLICT = URI.create("urn:flightsignal:problem:conflict");
     private static final URI TYPE_NOT_FOUND = URI.create("urn:flightsignal:problem:not-found");
+    private static final URI TYPE_FORBIDDEN = URI.create("urn:flightsignal:problem:forbidden");
 
     @ExceptionHandler(ApiException.class)
     ProblemDetail handleApiException(ApiException exception) {
@@ -35,6 +36,7 @@ public class ApiErrorHandler extends ResponseEntityExceptionHandler {
         problem.setType(switch (exception.status()) {
             case CONFLICT -> TYPE_CONFLICT;
             case NOT_FOUND -> TYPE_NOT_FOUND;
+            case FORBIDDEN -> TYPE_FORBIDDEN;
             default -> TYPE_VALIDATION;
         });
         return problem;

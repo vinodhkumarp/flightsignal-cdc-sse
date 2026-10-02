@@ -1604,3 +1604,187 @@ tbody tr:hover {
     transition-duration: 0.01ms !important;
   }
 }
+
+/* ---- Identity and station scope ---------------------------------------- */
+
+.user-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  padding-left: 18px;
+  border-left: 1px solid var(--border);
+}
+
+.user-badge__avatar {
+  width: 34px;
+  height: 34px;
+  display: grid;
+  place-items: center;
+  border-radius: 50%;
+  color: var(--green-dark);
+  background: var(--green-soft);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.user-badge__text {
+  display: flex;
+  flex-direction: column;
+  line-height: 1.25;
+}
+
+.user-badge__text strong {
+  font-size: 13px;
+}
+
+.user-badge__text small {
+  color: var(--muted);
+  font-size: 11px;
+  letter-spacing: 0.04em;
+}
+
+.scope-bar {
+  padding: 10px clamp(20px, 4vw, 64px);
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  border-bottom: 1px solid var(--border);
+  background: rgba(255, 255, 255, 0.6);
+}
+
+.scope-bar--empty {
+  color: var(--amber);
+  background: var(--amber-soft);
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.scope-bar__label {
+  margin-right: 4px;
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.station-chip {
+  min-height: 30px;
+  padding: 0 12px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  color: var(--ink);
+  background: white;
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+}
+
+.station-chip:hover:not(:disabled) {
+  border-color: #bdcbc5;
+  background: var(--wash);
+}
+
+.station-chip.is-active {
+  border-color: var(--green);
+  color: white;
+  background: var(--green);
+}
+
+.station-chip:disabled {
+  opacity: 0.45;
+}
+
+.scope-alert {
+  margin: 16px clamp(20px, 4vw, 64px) 0;
+  padding: 12px 16px;
+  border: 1px solid #f0c7c7;
+  border-radius: 12px;
+  color: var(--red);
+  background: var(--red-soft);
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.notification-item__route {
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+}
+
+.sign-in {
+  min-height: 100vh;
+  padding: 24px 16px;
+  display: grid;
+  place-items: center;
+}
+
+.sign-in__card {
+  width: min(520px, 100%);
+  padding: 32px;
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+}
+
+.sign-in__intro {
+  margin: 0;
+  color: var(--muted);
+  line-height: 1.5;
+}
+
+.sign-in__presets,
+.sign-in__station-grid {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.sign-in label {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.sign-in input:not([type='checkbox']) {
+  min-height: 42px;
+  padding: 0 12px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  font-size: 14px;
+}
+
+.sign-in__stations {
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  border: 0;
+}
+
+.sign-in__stations legend {
+  margin-bottom: 8px;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.sign-in label.sign-in__global {
+  flex-direction: row;
+  align-items: center;
+  gap: 8px;
+}
+
+@media (max-width: 820px) {
+  .user-badge__text {
+    display: none;
+  }
+
+  .user-badge {
+    padding-left: 10px;
+  }
+}

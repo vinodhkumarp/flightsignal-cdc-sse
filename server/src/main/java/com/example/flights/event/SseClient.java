@@ -2,6 +2,7 @@ package com.example.flights.event;
 
 import java.io.IOException;
 import java.time.Duration;
+import java.time.Instant;
 import java.util.HashSet;
 import java.util.Map;
 import java.util.Set;
@@ -14,6 +15,8 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
 
+import com.example.flights.security.StationScope;
+
 /**
  * One connected browser.
  *
@@ -23,6 +26,10 @@ import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
  * potentially slow socket writes, so one slow browser cannot delay delivery
  * to the others. A client whose queue overflows is disconnected; its browser
  * reconnects and catches up through replay.
+ *
+ * <p>Each client carries the {@link StationScope} from its JWT and only
+ * receives events for those stations. The connection is closed when the JWT
+ * expires so the browser reconnects with a fresh token.
  */
 public final class SseClient {
 
@@ -45,12 +52,15 @@ public final class SseClient {
         TIMEOUT,
         CLIENT_ERROR,
         SLOW_CONSUMER,
+        TOKEN_EXPIRED,
         SHUTDOWN
     }
 
     private final long id;
     private final SseEmitter emitter;
     private final BlockingQueue<Message> queue;
+    private final StationScope scope;
+    private final Instant expiresAt;
     private final BiConsumer<SseClient, CloseReason> onClosed;
     private final AtomicBoolean started = new AtomicBoolean();
     private final AtomicBoolean closed = new AtomicBoolean();
@@ -61,11 +71,29 @@ public final class SseClient {
             long id,
             SseEmitter emitter,
             int queueCapacity,
+            StationScope scope,
+            Instant expiresAt,
             BiConsumer<SseClient, CloseReason> onClosed) {
         this.id = id;
         this.emitter = emitter;
         this.queue = new ArrayBlockingQueue<>(Math.max(1, queueCapacity));
+        this.scope = scope;
+        this.expiresAt = expiresAt;
         this.onClosed = onClosed;
+    }
+
+    public StationScope scope() {
+        return scope;
+    }
+
+    /** {@code true} when this client may receive {@code event}. */
+    boolean wants(FlightEvent event) {
+        return scope.permits(event.stations());
+    }
+
+    /** {@code true} once the client's JWT has expired. */
+    boolean isExpiredAt(Instant now) {
+        return expiresAt != null && !now.isBefore(expiresAt);
     }
 
     public long id() {

@@ -16,12 +16,14 @@ import org.springframework.jdbc.core.namedparam.MapSqlParameterSource;
 import org.springframework.jdbc.core.namedparam.NamedParameterJdbcTemplate;
 import org.springframework.stereotype.Repository;
 
+import com.example.flights.security.StationScope;
+
 @Repository
 public class FlightRepository {
 
     private static final String SELECT_COLUMNS = """
             SELECT flight_id, carrier_code, flight_number, service_date,
-                   origin_airport, destination_airport,
+                   origin_airport, destination_airport, route_stations,
                    origin_timezone, destination_timezone,
                    scheduled_departure_utc, estimated_departure_utc,
                    actual_departure_utc, scheduled_arrival_utc,
@@ -48,7 +50,8 @@ public class FlightRepository {
             Map.entry("estimatedArrivalUtc", "estimated_arrival_utc"),
             Map.entry("actualArrivalUtc", "actual_arrival_utc"),
             Map.entry("status", "status"),
-            Map.entry("gate", "gate"));
+            Map.entry("gate", "gate"),
+            Map.entry("routeStations", "route_stations"));
 
     private final NamedParameterJdbcTemplate jdbc;
 
@@ -56,19 +59,35 @@ public class FlightRepository {
         this.jdbc = jdbc;
     }
 
-    public List<Flight> findAll() {
+    /** Flights touching at least one of the caller's stations. */
+    public List<Flight> findAll(StationScope scope) {
+        var parameters = new MapSqlParameterSource();
+        var where = "";
+        if (!scope.all()) {
+            where = " WHERE route_stations && string_to_array(:scopeStations, ',')";
+            parameters.addValue("scopeStations", scope.sqlList());
+        }
         return jdbc.query(
-                SELECT_COLUMNS
+                SELECT_COLUMNS + where
                         + " ORDER BY scheduled_departure_utc ASC, carrier_code, flight_number",
-                Map.of(),
+                parameters,
                 FLIGHT_MAPPER);
+    }
+
+    public Optional<Flight> findById(UUID flightId) {
+        return jdbc.query(
+                        SELECT_COLUMNS + " WHERE flight_id = :flightId",
+                        Map.of("flightId", flightId),
+                        FLIGHT_MAPPER)
+                .stream()
+                .findFirst();
     }
 
     public Flight insert(CreateFlightRequest flight) {
         var sql = """
                 INSERT INTO public.flight_instance (
                     carrier_code, flight_number, service_date,
-                    origin_airport, destination_airport,
+                    origin_airport, destination_airport, route_stations,
                     origin_timezone, destination_timezone,
                     scheduled_departure_utc, estimated_departure_utc,
                     actual_departure_utc, scheduled_arrival_utc,
@@ -77,6 +96,7 @@ public class FlightRepository {
                 ) VALUES (
                     :carrierCode, :flightNumber, :serviceDate,
                     :originAirport, :destinationAirport,
+                    string_to_array(:routeStations, ','),
                     :originTimezone, :destinationTimezone,
                     :scheduledDepartureUtc, :estimatedDepartureUtc,
                     :actualDepartureUtc, :scheduledArrivalUtc,
@@ -92,6 +112,7 @@ public class FlightRepository {
                 .addValue("serviceDate", flight.serviceDate())
                 .addValue("originAirport", flight.originAirport())
                 .addValue("destinationAirport", flight.destinationAirport())
+                .addValue("routeStations", joinStations(flight.routeStations()))
                 .addValue("originTimezone", flight.originTimezone())
                 .addValue("destinationTimezone", flight.destinationTimezone())
                 .addValue("scheduledDepartureUtc", jdbcValue(
@@ -123,8 +144,13 @@ public class FlightRepository {
 
         changes.forEach((property, value) -> {
             var column = UPDATE_COLUMNS.get(property);
-            assignments.add(column + " = :" + property);
-            parameters.addValue(property, jdbcValue(value));
+            if ("routeStations".equals(property)) {
+                assignments.add(column + " = string_to_array(:routeStations, ',')");
+                parameters.addValue(property, joinStations(asStations(value)));
+            } else {
+                assignments.add(column + " = :" + property);
+                parameters.addValue(property, jdbcValue(value));
+            }
         });
 
         var sql = """
@@ -159,6 +185,7 @@ public class FlightRepository {
                 resultSet.getObject("service_date", java.time.LocalDate.class),
                 resultSet.getString("origin_airport").trim(),
                 resultSet.getString("destination_airport").trim(),
+                textArray(resultSet.getArray("route_stations")),
                 resultSet.getString("origin_timezone"),
                 resultSet.getString("destination_timezone"),
                 instant(resultSet, "scheduled_departure_utc"),
@@ -178,6 +205,30 @@ public class FlightRepository {
             throws SQLException {
         var value = resultSet.getObject(column, OffsetDateTime.class);
         return value == null ? null : value.toInstant();
+    }
+
+    /** Station codes are validated [A-Z]{3}, so a comma join is safe. */
+    private static String joinStations(List<String> stations) {
+        return stations == null || stations.isEmpty() ? null : String.join(",", stations);
+    }
+
+    private static List<String> asStations(Object value) {
+        var stations = new ArrayList<String>();
+        if (value instanceof List<?> list) {
+            list.forEach(item -> stations.add(String.valueOf(item)));
+        }
+        return stations;
+    }
+
+    private static List<String> textArray(java.sql.Array array) throws SQLException {
+        if (array == null) {
+            return List.of();
+        }
+        try {
+            return List.of((String[]) array.getArray());
+        } finally {
+            array.free();
+        }
     }
 
     private static Object jdbcValue(Object value) {

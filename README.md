@@ -13,6 +13,7 @@ It detects committed `INSERT`, `UPDATE`, and `DELETE` operations on a flight tab
 - **Transactional change capture.** A trigger writes each flight change to an append-only event table and sends `NOTIFY` in the same transaction. No-op updates are ignored.
 - **Resilient listener.** It uses a dedicated LISTEN connection with a `SELECT 1` probe that detects half-open TCP connections. After any reconnect it catches up through every missed event.
 - **Production-style SSE.** Each browser has a bounded queue and its own sender thread, so one slow client cannot stall the others. There is a per-instance connection limit. Replay uses `Last-Event-ID` plus a safety window for out-of-order commits. A client that is too far behind gets a `reset` instead of a burst.
+- **Station-scoped notifications.** Every API call, including the SSE stream, is authenticated with the user's SSO JWT. Multi-leg flights are stored one row per leg, and each event carries that leg's stations (an update to QF1's SIN → LHR leg goes to SIN and LHR, never to SYD or AKL), and the server only sends users events for the stations in their token claims.
 - **Business-level events.** Notifications read like "Departure for QF11 has been delayed by 25 minutes. Gate changed from 12 to 31."
 - **Passenger-care workflow.** The notification center leads into manifest search.
 - **Continuous simulator.** It creates flights *with synthetic passenger manifests* and plays realistic disruption scenarios until you stop it.
@@ -40,13 +41,45 @@ This is **trigger-based CDC**, not WAL/logical decoding. `NOTIFY` is only a low-
 
 Design details, sequence diagrams, delivery semantics, and a failure-mode analysis are in [docs/APP_INFORMATION.md](docs/APP_INFORMATION.md).
 
+## Station-scoped notifications
+
+Users only see flights that touch the stations in their token. A multi-leg flight such as QF1 Sydney → Singapore → London is stored as one row per leg with the same flight number. Each leg can then be viewed, tracked and updated on its own:
+
+| User's `stations` claim | QF1 leg 1 SYD → SIN | QF1 leg 2 SIN → LHR | NZ104 SYD → AKL |
+|---|---|---|---|
+| `["SYD"]` | ✅ | — | ✅ |
+| `["SIN"]` | ✅ | ✅ | — |
+| `["LHR"]` | delays and cancellations only | ✅ | — |
+| `["AKL"]` | — | — | ✅ |
+| `["*"]` (head office) | ✅ | ✅ | ✅ |
+
+How it works:
+
+1. **Stations of a row:** each flight row stores `route_stations`. For a leg this defaults to the leg's origin and destination, so a gate change on SIN → LHR never reaches SYD.
+2. **Onward-leg alerts:** when an earlier leg is **delayed or cancelled**, the event also goes to the stations of the later legs of the same flight, because connecting passengers are affected. A delay on QF1 SYD → SIN therefore also reaches LHR, with "Onward connections at LHR may be affected." Later legs are found by following the chain: same flight number, departing from this leg's destination within 24 hours of its scheduled arrival. Other changes, such as gate or boarding, stay with the leg's own stations.
+3. **Event stations:** the capture trigger stamps every change event with the stations of the old **and** new route. A diversion from SIN to KUL therefore reaches both SIN and KUL.
+4. **Identity:** Spring Security validates the bearer JWT on every `/api/**` call. The stations come from a configurable claim (`app.security.stations-claim`). It can be an array or a space- or comma-separated string, and a dotted path reads nested claims. `*` or `ALL` grants every station.
+5. **Filtering on the server:** history, replay, the live stream, flight lists and passenger search are all filtered in SQL (GIN-indexed `&&`) or in the SSE hub. Another station's data is never sent to the browser.
+6. **Narrowing:** the UI can narrow the view to some of the user's stations with `?stations=SIN`. Asking for a station outside the token returns `403`.
+7. **Token expiry:** a stream closes when its JWT expires, and the browser reconnects with a fresh token.
+
+Because the native `EventSource` cannot send an `Authorization` header, the UI reads the stream with a small fetch-based SSE client (`web/src/lib/sse-client.js`).
+
+### Plugging in your SSO
+
+- **API:** set `SPRING_SECURITY_OAUTH2_RESOURCESERVER_JWT_ISSUER_URI` (and optionally `..._AUDIENCES`) to your identity provider, for example Entra ID, Okta or Keycloak, and drop the `dev` profile. If the stations claim isn't called `stations`, set `STATIONS_CLAIM`.
+- **UI:** build with `VITE_AUTH_MODE=sso` and provide `window.flightSignalSso` with `getAccessToken`, `signIn`, `signOut` and `isSignedIn` from your SSO library. An MSAL example is in `web/src/auth/providers/sso-provider.js`. Extend the nginx Content-Security-Policy `connect-src` to include your identity provider.
+
+For local runs and demos, the `dev` profile adds a development token issuer, and the UI shows a sign-in screen where you pick a name and stations. Never enable it in a shared environment.
+
 ## User workflow
 
-1. The workspace opens on the passenger-search form.
-2. The first new flight event shows a disruption banner and loads the matching passengers automatically.
-3. Later events show a toast and stay unread, so they never replace the flight currently being worked.
-4. Selecting a notification makes it active, marks it read, and loads its manifest.
-5. Operators can refine by route, passenger name, or booking reference.
+1. Sign in. In development, pick an identity such as "Singapore agent" or "Head office".
+2. The workspace opens on the passenger-search form, showing only your stations' notifications.
+3. The first new flight event shows a disruption banner and loads the matching passengers automatically.
+4. Later events show a toast and stay unread, so they never replace the flight currently being worked.
+5. Selecting a notification makes it active, marks it read, and loads its manifest.
+6. Operators can narrow to one of their stations, or refine by route, passenger name, or booking reference.
 
 ![FlightSignal notification center](docs/assets/notification-center.png)
 
@@ -101,8 +134,8 @@ make simulate-clean                             # remove all simulated data
 
 Each cycle writes straight to PostgreSQL, bypassing the REST API, which shows that capture happens at the database boundary:
 
-1. It creates a future flight on a realistic route **together with a synthetic passenger manifest, in one transaction**. The passengers therefore already exist when the "flight added" notification reaches the browser. Each manifest has cabins, seats, loyalty tiers, contact preferences, and occasional assistance needs.
-2. It plays a random scenario such as delay → delay → boarding → departed → arrived, gate change → delay → removed, or delay → cancelled. Every step is committed separately, so it arrives as its own live notification.
+1. It creates a future flight on a realistic route **together with a synthetic passenger manifest, in one transaction**. The passengers therefore already exist when the "flight added" notification reaches the browser. Each manifest has cabins, seats, loyalty tiers, contact preferences, and occasional assistance needs. Some flights have two legs, such as SYD → SIN → LHR. Each leg gets its own row and manifest, and through passengers appear on both legs with the same booking reference.
+2. It plays a random scenario on one leg, such as delay → delay → boarding → departed → arrived, gate change → delay → removed, or delay → cancelled. Every step is committed separately, so it arrives as its own live notification.
 
 | Variable | Default | Meaning |
 |---|---|---|
@@ -113,14 +146,18 @@ Each cycle writes straight to PostgreSQL, bypassing the REST API, which shows th
 
 ## API
 
+Every `/api/**` endpoint requires `Authorization: Bearer <JWT>` and only returns data for the stations in the token.
+
 | Method | Endpoint | Purpose |
 |---|---|---|
+| `GET` | `/api/me` | Name and stations resolved from the caller's token |
 | `GET` | `/api/flights` | Current flight instances |
 | `POST` | `/api/flights` | Create a flight |
 | `PATCH` | `/api/flights/{id}` | Update with optimistic concurrency (`version`) |
 | `DELETE` | `/api/flights/{id}` | Remove a flight |
-| `GET` | `/api/events?limit=30&before={id}` | Paginated, classified notification history |
-| `GET` | `/api/events/stream?after={id}` | Replayable SSE stream (`flight-change`, `ready`, `reset`) |
+| `GET` | `/api/events?limit=30&before={id}&stations=SIN` | Paginated, classified notification history (optional station narrowing) |
+| `GET` | `/api/events/stream?after={id}&stations=SIN` | Replayable SSE stream (`flight-change`, `ready`, `reset`) |
+| `POST` | `/api/dev/token` | Development profile only: issue a JWT for a name and stations |
 | `GET` | `/api/passengers?flightNumber=QF11&travelDate=2026-10-03` | Manifest search with optional filters |
 | `GET` | `/actuator/health/{liveness,readiness}` | Kubernetes-style probes |
 | `GET` | `/actuator/prometheus` | Metrics, including `flightsignal_*` |
@@ -172,16 +209,16 @@ The **Flight operations** page (add, delay, cancel, or remove flights from the U
 
 ## Production limitations
 
-- No authentication or authorization yet: every connected browser receives every event, and passenger data is unprotected. This is the main blocker for real use.
+- Authorization is per station. Finer-grained roles, for example read-only versus flight editing, would need extra claims.
 - Passenger PII would need data minimisation, encryption, access auditing, and retention policies.
 - PostgreSQL backup/restore and HA, edge rate limiting, tracing, dashboards, and alerts are not included.
 - Delivery is at-least-once with client de-duplication. Strict cross-transaction ordering is not guaranteed (see the delivery semantics in the docs).
-- Notification read state is per browser.
+- Notification read state is per user, but stored in the browser.
 
 ## Security and sample data
 
 - Passenger names, booking references, e-mail addresses (on the reserved `example.test` domain), and phone numbers are synthetic.
-- Default credentials in `.env.example` and `docker-compose.yml` are for local use only.
+- Default credentials and the development token secret in `.env.example` and `docker-compose.yml` are for local use only. The development token issuer must never run in a shared environment.
 - Containers run as non-root users. The web server sends a strict Content-Security-Policy and other security headers.
 - Environment files, build outputs, and common secret formats are excluded by `.gitignore`.
 

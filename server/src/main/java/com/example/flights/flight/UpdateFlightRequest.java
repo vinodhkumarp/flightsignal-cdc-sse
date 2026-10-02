@@ -2,6 +2,7 @@ package com.example.flights.flight;
 
 import java.time.Instant;
 import java.time.LocalDate;
+import java.util.List;
 
 public record UpdateFlightRequest(
         String carrierCode,
@@ -19,6 +20,7 @@ public record UpdateFlightRequest(
         Instant actualArrivalUtc,
         String status,
         String gate,
+        List<String> routeStations,
         Long version) {
 }
 

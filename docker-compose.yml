@@ -43,6 +43,10 @@ services:
       SPRING_DATASOURCE_USERNAME: ${POSTGRES_USER:-flights}
       SPRING_DATASOURCE_PASSWORD: ${POSTGRES_PASSWORD:-flights}
       EVENT_RETENTION: ${EVENT_RETENTION:-30d}
+      # Development token issuer (dev profile only). For SSO, drop "dev" from
+      # API_PROFILES and set SPRING_SECURITY_OAUTH2_RESOURCESERVER_JWT_ISSUER_URI.
+      DEV_TOKEN_SECRET: ${DEV_TOKEN_SECRET:-flightsignal-local-development-secret-change-me}
+      STATIONS_CLAIM: ${STATIONS_CLAIM:-stations}
     ports:
       - "${API_PORT:-3101}:3101"
     depends_on:
@@ -58,6 +62,7 @@ services:
       dockerfile: web/Dockerfile
       args:
         VITE_SHOW_FLIGHT_OPERATIONS: ${VITE_SHOW_FLIGHT_OPERATIONS:-false}
+        VITE_AUTH_MODE: ${VITE_AUTH_MODE:-dev}
     image: flightsignal-web:local
     environment:
       API_UPSTREAM: http://api:3101

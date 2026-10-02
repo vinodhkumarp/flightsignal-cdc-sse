@@ -116,6 +116,62 @@ class FlightEventClassifierTest {
     }
 
     @Test
+    void mentionsViaStationsForAMultiStopFlightAndKeepsEventStations() {
+        var json = flightJson("2026-10-02T01:00:00Z", "SCHEDULED", "12", 1)
+                .replace("\"destination_airport\": \"LAX\",",
+                        "\"destination_airport\": \"LHR\", \"route_stations\": [\"SYD\", \"SIN\", \"LHR\"],");
+
+        var event = classifier.classify(event("INSERT", null, json));
+
+        assertThat(event.message()).isEqualTo("Flight AA112 from SYD to LHR via SIN has been added.");
+        assertThat(event.flight().routeStations()).containsExactly("SYD", "SIN", "LHR");
+        assertThat(event.stations()).containsExactly("LAX", "SYD");
+    }
+
+    @Test
+    void mentionsOnwardStationsAlertedForADelayedEarlierLeg() {
+        var row = new FlightChangeRow(
+                43,
+                "UPDATE",
+                UUID.fromString("2eec1981-08c8-4bab-ad6d-8801e607a777"),
+                flightJson("2026-10-02T01:00:00Z", "SCHEDULED", "12", 1),
+                flightJson("2026-10-02T01:30:00Z", "DELAYED", "12", 2),
+                Instant.parse("2026-10-01T02:00:00Z"),
+                java.util.List.of("LAX", "NRT", "SYD"));
+
+        var event = classifier.classify(row);
+
+        assertThat(event.type()).isEqualTo("flight.departure.delayed");
+        assertThat(event.message()).isEqualTo(
+                "Departure for AA112 has been delayed by 30 minutes."
+                        + " Onward connections at NRT may be affected.");
+    }
+
+    @Test
+    void classifiesADiversion() {
+        var diverted = flightJson("2026-10-02T01:00:00Z", "SCHEDULED", "12", 2)
+                .replace("\"destination_airport\": \"LAX\",",
+                        "\"destination_airport\": \"HNL\", \"route_stations\": [\"SYD\", \"HNL\"],");
+
+        var event = classifier.classify(event(
+                "UPDATE",
+                flightJson("2026-10-02T01:00:00Z", "SCHEDULED", "12", 1),
+                diverted));
+
+        assertThat(event.type()).isEqualTo("flight.route.changed");
+        assertThat(event.severity()).isEqualTo("warning");
+        assertThat(event.message()).isEqualTo("Route for AA112 changed to SYD → HNL (was SYD → LAX).");
+    }
+
+    @Test
+    void defaultsTheRouteToOriginAndDestination() {
+        var event = classifier.classify(event("INSERT", null, flightJson(
+                "2026-10-02T01:00:00Z", "SCHEDULED", "12", 1)));
+
+        assertThat(event.flight().routeStations()).containsExactly("SYD", "LAX");
+    }
+
+    @Test
     void classifiesARemovedFlightUsingTheOldRow() {
         var event = classifier.classify(event(
                 "DELETE",
@@ -137,7 +193,8 @@ class FlightEventClassifierTest {
                 UUID.fromString("2eec1981-08c8-4bab-ad6d-8801e607a777"),
                 oldRow,
                 newRow,
-                Instant.parse("2026-10-01T02:00:00Z"));
+                Instant.parse("2026-10-01T02:00:00Z"),
+                java.util.List.of("LAX", "SYD"));
     }
 
     private static String flightJson(

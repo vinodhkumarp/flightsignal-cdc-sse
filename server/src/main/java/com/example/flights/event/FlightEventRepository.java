@@ -1,24 +1,38 @@
 package com.example.flights.event;
 
+import java.sql.Array;
 import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.time.Duration;
 import java.time.OffsetDateTime;
+import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.UUID;
 
 import org.springframework.jdbc.core.RowMapper;
+import org.springframework.jdbc.core.namedparam.MapSqlParameterSource;
 import org.springframework.jdbc.core.namedparam.NamedParameterJdbcTemplate;
 import org.springframework.stereotype.Repository;
 
+import com.example.flights.security.StationScope;
+
+/**
+ * Reads the durable change log.
+ *
+ * <p>Methods taking a {@link StationScope} return only events whose
+ * {@code stations} overlap the caller's stations (GIN-indexed {@code &&}).
+ * Unscoped methods are for the server-side listener, which must see every
+ * event before deciding who receives it.
+ */
 @Repository
 public class FlightEventRepository {
 
     private static final String SELECT_EVENT = """
             SELECT event_id, operation, flight_id, old_row::text, new_row::text,
-                   occurred_at
+                   occurred_at, stations
             FROM app_internal.flight_change_event
             """;
 
@@ -40,12 +54,39 @@ public class FlightEventRepository {
                 .findFirst();
     }
 
+    /** Every event after {@code eventId}, ascending (listener catch-up). */
     public List<FlightChangeRow> findAfter(long eventId, int limit) {
+        return findAfter(eventId, limit, StationScope.allStations());
+    }
+
+    /** Events visible to {@code scope} after {@code eventId}, ascending (SSE replay). */
+    public List<FlightChangeRow> findAfter(long eventId, int limit, StationScope scope) {
+        var conditions = new ArrayList<String>();
+        var parameters = new MapSqlParameterSource()
+                .addValue("eventId", eventId)
+                .addValue("limit", limit);
+        conditions.add("event_id > :eventId");
+        addScope(scope, conditions, parameters);
+
         return jdbc.query(
-                SELECT_EVENT
-                        + " WHERE event_id > :eventId"
-                        + " ORDER BY event_id ASC LIMIT :limit",
-                Map.of("eventId", eventId, "limit", limit),
+                SELECT_EVENT + where(conditions) + " ORDER BY event_id ASC LIMIT :limit",
+                parameters,
+                EVENT_MAPPER);
+    }
+
+    /** Newest-first keyset page of events visible to {@code scope}. */
+    public List<FlightChangeRow> findPage(Long before, int limit, StationScope scope) {
+        var conditions = new ArrayList<String>();
+        var parameters = new MapSqlParameterSource().addValue("limit", limit);
+        if (before != null) {
+            conditions.add("event_id < :before");
+            parameters.addValue("before", before);
+        }
+        addScope(scope, conditions, parameters);
+
+        return jdbc.query(
+                SELECT_EVENT + where(conditions) + " ORDER BY event_id DESC LIMIT :limit",
+                parameters,
                 EVENT_MAPPER);
     }
 
@@ -80,24 +121,23 @@ public class FlightEventRepository {
         return deleted == null ? 0 : deleted;
     }
 
-    public List<FlightChangeRow> findRecent(int limit) {
-        return jdbc.query(
-                SELECT_EVENT + " ORDER BY event_id DESC LIMIT :limit",
-                Map.of("limit", limit),
-                EVENT_MAPPER);
+    private static void addScope(
+            StationScope scope,
+            List<String> conditions,
+            MapSqlParameterSource parameters) {
+        if (scope.all()) {
+            return;
+        }
+        if (scope.isEmpty()) {
+            conditions.add("false");
+            return;
+        }
+        conditions.add("stations && string_to_array(:scopeStations, ',')");
+        parameters.addValue("scopeStations", scope.sqlList());
     }
 
-    public List<FlightChangeRow> findPage(Long before, int limit) {
-        if (before == null) {
-            return findRecent(limit);
-        }
-
-        return jdbc.query(
-                SELECT_EVENT
-                        + " WHERE event_id < :before"
-                        + " ORDER BY event_id DESC LIMIT :limit",
-                Map.of("before", before, "limit", limit),
-                EVENT_MAPPER);
+    private static String where(List<String> conditions) {
+        return conditions.isEmpty() ? "" : " WHERE " + String.join(" AND ", conditions);
     }
 
     private static FlightChangeRow mapEvent(ResultSet resultSet, int rowNumber)
@@ -109,6 +149,18 @@ public class FlightEventRepository {
                 resultSet.getString("old_row"),
                 resultSet.getString("new_row"),
                 resultSet.getObject("occurred_at", OffsetDateTime.class)
-                        .toInstant());
+                        .toInstant(),
+                textArray(resultSet.getArray("stations")));
+    }
+
+    static List<String> textArray(Array array) throws SQLException {
+        if (array == null) {
+            return List.of();
+        }
+        try {
+            return Arrays.asList((String[]) array.getArray());
+        } finally {
+            array.free();
+        }
     }
 }

@@ -6,6 +6,7 @@ import java.util.Optional;
 import org.springframework.stereotype.Service;
 
 import com.example.flights.config.SseProperties;
+import com.example.flights.security.StationScope;
 
 @Service
 public class FlightEventService {
@@ -42,8 +43,8 @@ public class FlightEventService {
         return repository.findIdsAfter(eventId, limit);
     }
 
-    public FlightEventPage findPage(Long before, int limit) {
-        var rows = repository.findPage(before, limit + 1);
+    public FlightEventPage findPage(Long before, int limit, StationScope scope) {
+        var rows = repository.findPage(before, limit + 1, scope);
         var hasMore = rows.size() > limit;
         var pageRows = hasMore ? rows.subList(0, limit) : rows;
         var events = pageRows.stream()
@@ -68,12 +69,14 @@ public class FlightEventService {
      * <p>If more than {@code replayLimit} events are newer than the cursor the
      * client is asked to reset (reload its history) rather than receiving an
      * unbounded burst.
+     *
+     * <p>Only events visible to {@code scope} are considered.
      */
-    public EventReplay replayAfter(long cursor) {
+    public EventReplay replayAfter(long cursor, StationScope scope) {
         var window = Math.max(0, sseProperties.replaySafetyWindow());
         var limit = Math.max(1, sseProperties.replayLimit());
         var from = Math.max(0, cursor - window);
-        var rows = repository.findAfter(from, window + limit + 1);
+        var rows = repository.findAfter(from, window + limit + 1, scope);
         var newer = rows.stream()
                 .filter(row -> row.eventId() > cursor)
                 .count();

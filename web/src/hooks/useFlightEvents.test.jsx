@@ -1,54 +1,40 @@
 import { act, renderHook, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { configureApiAuth } from '../api.js';
 import { useFlightEvents } from './useFlightEvents.js';
 
-class FakeEventSource {
-  static CONNECTING = 0;
-  static OPEN = 1;
-  static CLOSED = 2;
-  static instances = [];
+const streams = [];
 
-  constructor(url) {
-    this.url = url;
-    this.readyState = FakeEventSource.CONNECTING;
-    this.listeners = {};
-    this.onerror = null;
-    FakeEventSource.instances.push(this);
-  }
+vi.mock('../lib/sse-client.js', () => ({
+  openEventStream: vi.fn((url, options) => {
+    const stream = {
+      url,
+      options,
+      closed: false,
+      close() {
+        this.closed = true;
+      },
+      emit(type, data) {
+        options.onEvent({ type, data: JSON.stringify(data) });
+      },
+      end(details) {
+        options.onError(details);
+      }
+    };
+    streams.push(stream);
+    return stream;
+  })
+}));
 
-  addEventListener(type, listener) {
-    (this.listeners[type] ??= []).push(listener);
-  }
-
-  emit(type, data) {
-    if (type === 'ready') {
-      this.readyState = FakeEventSource.OPEN;
-    }
-    for (const listener of this.listeners[type] ?? []) {
-      listener({ data: JSON.stringify(data) });
-    }
-  }
-
-  fail({ closed }) {
-    this.readyState = closed ? FakeEventSource.CLOSED : FakeEventSource.CONNECTING;
-    this.onerror?.(new Event('error'));
-  }
-
-  close() {
-    this.readyState = FakeEventSource.CLOSED;
-  }
-
-  static latest() {
-    return FakeEventSource.instances.at(-1);
-  }
-}
+const latest = () => streams.at(-1);
 
 const event = (eventId) => ({
   eventId: String(eventId),
   occurredAt: '2026-10-02T01:00:00Z',
   type: 'flight.gate.changed',
   severity: 'info',
-  message: 'Event ' + eventId
+  message: 'Event ' + eventId,
+  stations: ['SYD']
 });
 
 function jsonResponse(body, status = 200) {
@@ -63,9 +49,12 @@ function historyPage(...ids) {
 }
 
 describe('useFlightEvents', () => {
+  let onUnauthorized;
+
   beforeEach(() => {
-    FakeEventSource.instances = [];
-    vi.stubGlobal('EventSource', FakeEventSource);
+    streams.length = 0;
+    onUnauthorized = vi.fn();
+    configureApiAuth({ getAccessToken: async () => 'token-123', onUnauthorized });
   });
 
   afterEach(() => {
@@ -73,82 +62,106 @@ describe('useFlightEvents', () => {
     vi.unstubAllGlobals();
   });
 
-  it('opens the stream after the newest loaded event', async () => {
-    vi.stubGlobal('fetch', vi.fn(() => jsonResponse(historyPage(12, 11, 10))));
-
-    const { result } = renderHook(() => useFlightEvents());
-
-    await waitFor(() => expect(FakeEventSource.instances).toHaveLength(1));
-    expect(FakeEventSource.latest().url).toBe('/api/events/stream?after=12');
-    expect(result.current.events.map((e) => e.eventId)).toEqual(['12', '11', '10']);
-
-    act(() => FakeEventSource.latest().emit('ready', { connected: true }));
-    expect(result.current.connection).toBe('connected');
-  });
-
-  it('never opens the stream without history and retries the history request', async () => {
-    vi.useFakeTimers({ shouldAdvanceTime: true });
-    const fetchMock = vi.fn()
-      .mockImplementationOnce(() => jsonResponse({ detail: 'down' }, 503))
-      .mockImplementation(() => jsonResponse(historyPage(5)));
+  it('authenticates history and stream, and resumes after the newest event', async () => {
+    const fetchMock = vi.fn(() => jsonResponse(historyPage(12, 11, 10)));
     vi.stubGlobal('fetch', fetchMock);
 
     const { result } = renderHook(() => useFlightEvents());
 
+    await waitFor(() => expect(streams).toHaveLength(1));
+    expect(fetchMock.mock.calls[0][1].headers.Authorization).toBe('Bearer token-123');
+    expect(latest().url).toBe('/api/events/stream?after=12');
+    expect(latest().options.headers.Authorization).toBe('Bearer token-123');
+    expect(result.current.events.map((e) => e.eventId)).toEqual(['12', '11', '10']);
+
+    act(() => latest().emit('ready', { connected: true }));
+    expect(result.current.connection).toBe('connected');
+  });
+
+  it('passes a station filter to history and stream', async () => {
+    const fetchMock = vi.fn(() => jsonResponse(historyPage(3)));
+    vi.stubGlobal('fetch', fetchMock);
+
+    renderHook(() => useFlightEvents({ stations: ['SIN', 'SYD'] }));
+
+    await waitFor(() => expect(streams).toHaveLength(1));
+    expect(fetchMock.mock.calls[0][0]).toBe('/api/events?limit=30&stations=SIN%2CSYD');
+    expect(latest().url).toBe('/api/events/stream?after=3&stations=SIN%2CSYD');
+  });
+
+  it('never opens the stream without history and retries the history request', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    vi.stubGlobal('fetch', vi.fn()
+      .mockImplementationOnce(() => jsonResponse({ detail: 'down' }, 503))
+      .mockImplementation(() => jsonResponse(historyPage(5))));
+
+    const { result } = renderHook(() => useFlightEvents());
+
     await waitFor(() => expect(result.current.connection).toBe('reconnecting'));
-    expect(FakeEventSource.instances).toHaveLength(0);
+    expect(streams).toHaveLength(0);
 
     await act(async () => {
       await vi.advanceTimersByTimeAsync(1_500);
     });
 
-    await waitFor(() => expect(FakeEventSource.instances).toHaveLength(1));
-    expect(FakeEventSource.latest().url).toBe('/api/events/stream?after=5');
+    await waitFor(() => expect(streams).toHaveLength(1));
+    expect(latest().url).toBe('/api/events/stream?after=5');
   });
 
   it('raises a live notification only for events it has not seen', async () => {
+    const onLiveEvent = vi.fn();
     vi.stubGlobal('fetch', vi.fn(() => jsonResponse(historyPage(3, 2))));
-    const { result } = renderHook(() => useFlightEvents());
-    await waitFor(() => expect(FakeEventSource.instances).toHaveLength(1));
-    const source = FakeEventSource.latest();
+    const { result } = renderHook(() => useFlightEvents({ onLiveEvent }));
+    await waitFor(() => expect(streams).toHaveLength(1));
 
-    // Replayed safety-window event the page already has.
-    act(() => source.emit('flight-change', event(3)));
+    act(() => latest().emit('flight-change', event(3)));
     expect(result.current.latestLiveEvent).toBeNull();
 
-    act(() => source.emit('flight-change', event(4)));
+    act(() => latest().emit('flight-change', event(4)));
     expect(result.current.latestLiveEvent.eventId).toBe('4');
+    expect(onLiveEvent).toHaveBeenCalledTimes(1);
     expect(result.current.events.map((e) => e.eventId)).toEqual(['4', '3', '2']);
   });
 
-  it('reconnects manually when the browser gives up on the stream', async () => {
+  it('reconnects with a fresh token after the stream ends', async () => {
     vi.useFakeTimers({ shouldAdvanceTime: true });
     vi.stubGlobal('fetch', vi.fn(() => jsonResponse(historyPage(7))));
     const { result } = renderHook(() => useFlightEvents());
-    await waitFor(() => expect(FakeEventSource.instances).toHaveLength(1));
-    const first = FakeEventSource.latest();
-    act(() => first.emit('flight-change', event(8)));
+    await waitFor(() => expect(streams).toHaveLength(1));
+    act(() => latest().emit('flight-change', event(8)));
 
-    act(() => first.fail({ closed: true }));
+    configureApiAuth({ getAccessToken: async () => 'token-456', onUnauthorized });
+    act(() => latest().end({ type: 'closed' }));
     expect(result.current.connection).toBe('reconnecting');
 
     await act(async () => {
       await vi.advanceTimersByTimeAsync(1_500);
     });
 
-    expect(FakeEventSource.instances).toHaveLength(2);
-    expect(FakeEventSource.latest().url).toBe('/api/events/stream?after=8');
+    await waitFor(() => expect(streams).toHaveLength(2));
+    expect(latest().url).toBe('/api/events/stream?after=8');
+    expect(latest().options.headers.Authorization).toBe('Bearer token-456');
   });
 
-  it('keeps the browser reconnecting on transient errors', async () => {
+  it('hands a 401 back to the auth layer instead of retrying', async () => {
+    vi.stubGlobal('fetch', vi.fn(() => jsonResponse(historyPage(1))));
+    renderHook(() => useFlightEvents());
+    await waitFor(() => expect(streams).toHaveLength(1));
+
+    act(() => latest().end({ type: 'http', status: 401 }));
+
+    expect(onUnauthorized).toHaveBeenCalled();
+    expect(streams).toHaveLength(1);
+  });
+
+  it('stops on 403 and reports no access', async () => {
     vi.stubGlobal('fetch', vi.fn(() => jsonResponse(historyPage(1))));
     const { result } = renderHook(() => useFlightEvents());
-    await waitFor(() => expect(FakeEventSource.instances).toHaveLength(1));
+    await waitFor(() => expect(streams).toHaveLength(1));
 
-    act(() => FakeEventSource.latest().fail({ closed: false }));
+    act(() => latest().end({ type: 'http', status: 403 }));
 
-    expect(result.current.connection).toBe('reconnecting');
-    expect(FakeEventSource.instances).toHaveLength(1);
+    expect(result.current.connection).toBe('forbidden');
   });
 
   it('reloads history when the server asks for a reset', async () => {
@@ -157,23 +170,22 @@ describe('useFlightEvents', () => {
       .mockImplementation(() => jsonResponse(historyPage(900, 899)));
     vi.stubGlobal('fetch', fetchMock);
     const { result } = renderHook(() => useFlightEvents());
-    await waitFor(() => expect(FakeEventSource.instances).toHaveLength(1));
+    await waitFor(() => expect(streams).toHaveLength(1));
 
-    act(() => FakeEventSource.latest().emit('reset', { reason: 'replay-limit-exceeded' }));
+    act(() => latest().emit('reset', { reason: 'replay-limit-exceeded' }));
 
     await waitFor(() =>
       expect(result.current.events.map((e) => e.eventId)).toEqual(['900', '899', '2', '1'])
     );
-    expect(fetchMock).toHaveBeenCalledTimes(2);
   });
 
   it('closes the stream on unmount', async () => {
     vi.stubGlobal('fetch', vi.fn(() => jsonResponse(historyPage(1))));
     const { unmount } = renderHook(() => useFlightEvents());
-    await waitFor(() => expect(FakeEventSource.instances).toHaveLength(1));
+    await waitFor(() => expect(streams).toHaveLength(1));
 
     unmount();
 
-    expect(FakeEventSource.latest().readyState).toBe(FakeEventSource.CLOSED);
+    expect(latest().closed).toBe(true);
   });
 });

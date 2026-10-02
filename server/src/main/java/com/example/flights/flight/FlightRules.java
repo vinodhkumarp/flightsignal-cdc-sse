@@ -2,6 +2,9 @@ package com.example.flights.flight;
 
 import java.time.DateTimeException;
 import java.time.ZoneId;
+import java.util.ArrayList;
+import java.util.LinkedHashSet;
+import java.util.List;
 import java.util.Locale;
 import java.util.Set;
 import java.util.function.UnaryOperator;
@@ -30,6 +33,7 @@ final class FlightRules {
     private static final Pattern FLIGHT_NUMBER = Pattern.compile("[A-Z0-9]{1,8}");
     private static final Pattern AIRPORT = Pattern.compile("[A-Z]{3}");
     private static final int GATE_MAX_LENGTH = 12;
+    private static final int MAX_ROUTE_STATIONS = 10;
 
     private FlightRules() {
     }
@@ -86,6 +90,25 @@ final class FlightRules {
         require(trimmed.length() <= GATE_MAX_LENGTH,
                 "gate must be at most " + GATE_MAX_LENGTH + " characters.");
         return trimmed;
+    }
+
+    /**
+     * Normalises a journey's stations (e.g. {@code [syd, SIN, lhr]} to
+     * {@code [SYD, SIN, LHR]}), removing duplicates but keeping order.
+     *
+     * @return {@code null} when no route was supplied
+     */
+    static List<String> routeStations(List<String> value) {
+        if (value == null || value.isEmpty()) {
+            return null;
+        }
+        var stations = new LinkedHashSet<String>();
+        for (var station : value) {
+            stations.add(airport("routeStations").apply(station));
+        }
+        require(stations.size() >= 2 && stations.size() <= MAX_ROUTE_STATIONS,
+                "routeStations must contain between 2 and " + MAX_ROUTE_STATIONS + " stations.");
+        return new ArrayList<>(stations);
     }
 
     /** Applies {@code rule} only when a value was supplied (PATCH semantics). */

@@ -16,6 +16,7 @@ import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
 
 import com.example.flights.config.SseProperties;
 import com.example.flights.event.SseClient.CloseReason;
+import com.example.flights.security.StationScope;
 
 import io.micrometer.core.instrument.Counter;
 import io.micrometer.core.instrument.Gauge;
@@ -26,7 +27,9 @@ import io.micrometer.core.instrument.Timer;
  * Registry of connected SSE clients and fan-out point for flight events.
  *
  * <p>Broadcasting only enqueues work; each {@link SseClient} writes to its own
- * socket on its own virtual thread.
+ * socket on its own virtual thread. An event is queued only for clients whose
+ * station scope overlaps the event's stations, so a browser never receives
+ * another station's flights.
  */
 @Component
 public class SseHub implements SmartLifecycle {
@@ -68,8 +71,11 @@ public class SseHub implements SmartLifecycle {
      *
      * <p>The client starts buffering live events immediately; call
      * {@link #start(SseClient, EventReplay)} once the replay is known.
+     *
+     * @param scope     stations the client may receive
+     * @param expiresAt JWT expiry; the stream is closed at that time
      */
-    public Optional<SseClient> register() {
+    public Optional<SseClient> register(StationScope scope, Instant expiresAt) {
         if (!running || clients.size() >= properties.maxClients()) {
             rejectedCounter.increment();
             return Optional.empty();
@@ -80,6 +86,8 @@ public class SseHub implements SmartLifecycle {
                 clientIds.incrementAndGet(),
                 emitter,
                 properties.clientQueueCapacity(),
+                scope,
+                expiresAt,
                 this::onClosed);
         clients.add(client);
 
@@ -104,6 +112,9 @@ public class SseHub implements SmartLifecycle {
 
         var message = new SseClient.EventMessage(event);
         for (var client : clients) {
+            if (!client.wants(event)) {
+                continue;
+            }
             if (!client.offer(message)) {
                 client.close(CloseReason.SLOW_CONSUMER);
             }
@@ -112,7 +123,12 @@ public class SseHub implements SmartLifecycle {
 
     @Scheduled(fixedDelayString = "${app.sse.heartbeat:20s}")
     void heartbeat() {
+        var now = Instant.now();
         for (var client : clients) {
+            if (client.isExpiredAt(now)) {
+                client.close(CloseReason.TOKEN_EXPIRED);
+                continue;
+            }
             if (!client.offer(SseClient.Heartbeat.INSTANCE)) {
                 client.close(CloseReason.SLOW_CONSUMER);
             }

@@ -15,6 +15,8 @@ import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
 
+import com.example.flights.security.StationScope;
+
 @RestController
 @RequestMapping("/api/flights")
 public class FlightController {
@@ -26,28 +28,30 @@ public class FlightController {
     }
 
     @GetMapping
-    Map<String, List<Flight>> findAll() {
-        return Map.of("flights", service.findAll());
+    Map<String, List<Flight>> findAll(StationScope scope) {
+        return Map.of("flights", service.findAll(scope));
     }
 
     @PostMapping
     ResponseEntity<Map<String, Flight>> create(
-            @RequestBody CreateFlightRequest request) {
+            @RequestBody CreateFlightRequest request,
+            StationScope scope) {
         return ResponseEntity
                 .status(HttpStatus.CREATED)
-                .body(Map.of("flight", service.create(request)));
+                .body(Map.of("flight", service.create(request, scope)));
     }
 
     @PatchMapping("/{flightId}")
     Map<String, Flight> update(
             @PathVariable UUID flightId,
-            @RequestBody UpdateFlightRequest request) {
-        return Map.of("flight", service.update(flightId, request));
+            @RequestBody UpdateFlightRequest request,
+            StationScope scope) {
+        return Map.of("flight", service.update(flightId, request, scope));
     }
 
     @DeleteMapping("/{flightId}")
-    Map<String, Flight> delete(@PathVariable UUID flightId) {
-        return Map.of("flight", service.delete(flightId));
+    Map<String, Flight> delete(@PathVariable UUID flightId, StationScope scope) {
+        return Map.of("flight", service.delete(flightId, scope));
     }
 }
 

@@ -14,13 +14,14 @@ import org.junit.jupiter.api.Test;
 import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
 
 import com.example.flights.event.SseClient.CloseReason;
+import com.example.flights.security.StationScope;
 
 class SseClientTest {
 
     @Test
     void sendsReplayThenReadyThenLiveEventsWithoutDuplicates() {
         var emitter = new CapturingEmitter();
-        var client = new SseClient(1, emitter, 16, (c, reason) -> { });
+        var client = new SseClient(1, emitter, 16, StationScope.allStations(), null, (c, reason) -> { });
 
         // Live events that arrive while the replay query runs are buffered.
         client.offer(new SseClient.EventMessage(event("2")));
@@ -41,7 +42,7 @@ class SseClientTest {
     @Test
     void sendsResetInsteadOfReplayWhenTheClientIsTooFarBehind() {
         var emitter = new CapturingEmitter();
-        var client = new SseClient(2, emitter, 16, (c, reason) -> { });
+        var client = new SseClient(2, emitter, 16, StationScope.allStations(), null, (c, reason) -> { });
 
         client.start(EventReplay.reset(), Duration.ofSeconds(3));
 
@@ -55,7 +56,7 @@ class SseClientTest {
     @Test
     void reportsAFullQueueAndClosesOnlyOnce() {
         var reasons = new CopyOnWriteArrayList<CloseReason>();
-        var client = new SseClient(3, new CapturingEmitter(), 1, (c, reason) -> reasons.add(reason));
+        var client = new SseClient(3, new CapturingEmitter(), 1, StationScope.allStations(), null, (c, reason) -> reasons.add(reason));
 
         assertThat(client.offer(SseClient.Heartbeat.INSTANCE)).isTrue();
         assertThat(client.offer(SseClient.Heartbeat.INSTANCE)).isFalse();
@@ -72,7 +73,7 @@ class SseClientTest {
         var reason = new AtomicReference<CloseReason>();
         var emitter = new CapturingEmitter();
         emitter.failWith = new IOException("Broken pipe");
-        var client = new SseClient(4, emitter, 16, (c, r) -> reason.set(r));
+        var client = new SseClient(4, emitter, 16, StationScope.allStations(), null, (c, r) -> reason.set(r));
 
         client.start(EventReplay.none(), Duration.ofSeconds(3));
 
@@ -91,7 +92,8 @@ class SseClientTest {
                 "flight.updated",
                 "info",
                 "Updated " + id,
-                null);
+                null,
+                List.of("SYD"));
     }
 
     /** Records each SSE frame as text instead of writing to a response. */

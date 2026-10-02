@@ -26,13 +26,14 @@
 6. [SSE connection and replay flow](#sse-connection-and-replay-flow)
 7. [Event classification](#event-classification)
 8. [Delivery semantics](#delivery-semantics)
-9. [Failure and recovery analysis](#failure-and-recovery-analysis)
-10. [Code and class responsibilities](#code-and-class-responsibilities)
-11. [API reference](#api-reference)
-12. [Development and operations](#development-and-operations)
-13. [Testing](#testing)
-14. [Production hardening recommendations](#production-hardening-recommendations)
-15. [Passenger-care Phase 2](#passenger-care-phase-2)
+9. [Authentication and station-scoped delivery](#authentication-and-station-scoped-delivery)
+10. [Failure and recovery analysis](#failure-and-recovery-analysis)
+11. [Code and class responsibilities](#code-and-class-responsibilities)
+12. [API reference](#api-reference)
+13. [Development and operations](#development-and-operations)
+14. [Testing](#testing)
+15. [Production hardening recommendations](#production-hardening-recommendations)
+16. [Passenger-care Phase 2](#passenger-care-phase-2)
 
 ## Executive summary
 
@@ -458,6 +459,51 @@ The public `FlightEvent` also contains the current flight, previous flight, data
 
 The effective model is at-least-once with client-side de-duplication.
 
+## Authentication and station-scoped delivery
+
+The application is used worldwide, so a notification is only delivered to users responsible for a station the flight touches. The user's stations come from their SSO JWT, not from where their browser happens to be: IP location is unreliable (VPNs, roaming staff) and is not an authorization signal.
+
+### Data model
+
+- Multi-leg flights are stored **one row per leg** with the same carrier and flight number. QF1 is `SYD → SIN` and `SIN → LHR`. Each leg has its own times, gate, status and manifest; through passengers appear on both legs with the same booking reference.
+- `flight_instance.route_stations text[]` lists the stations a row's notifications go to. A `BEFORE INSERT/UPDATE` trigger normalises it (upper case, de-duplicated) and defaults it to the leg's `{origin, destination}`, so an update to the SIN → LHR leg reaches SIN and LHR users but never SYD. Writers may add stations to a leg so that they are always alerted.
+- **Onward-leg alerts** (`V4__onward_leg_alerts.sql`): when an update delays a leg (its effective departure or arrival gets later, or its status becomes `DELAYED`) or cancels it, the capture trigger adds the stations of the later legs of the same flight. `app_internal.onward_leg_stations` follows the chain: same carrier and number, departing from this leg's destination within 24 hours after its scheduled arrival, up to 8 legs, so the next day's QF1 is never included. A delayed QF1 SYD → SIN therefore reaches LHR, and the classifier appends "Onward connections at LHR may be affected." Gate, boarding and other changes stay with the leg's own stations.
+- `flight_change_event.stations text[]` is written by the capture trigger as the union of the old and new route, plus origin and destination. A diversion therefore reaches both the station losing and the station gaining the flight. Both columns have GIN indexes.
+- Migration `V3__station_routing.sql` backfills existing rows with the triggers disabled, so the schema change does not notify every browser.
+
+### Identity
+
+- Spring Security runs as a stateless OAuth2 resource server. Every `/api/**` request, including the SSE stream, needs a valid bearer JWT. Health and Prometheus endpoints stay open for probes and scraping.
+- In real environments the JWT is validated against the organisation's issuer (`spring.security.oauth2.resourceserver.jwt.issuer-uri`, optional `audiences`). With no issuer and no development issuer configured, the application refuses to start.
+- `StationScopeResolver` reads the stations claim. The claim name is configurable, a dotted path reads nested claims, and the value may be an array or a space- or comma-separated string. Any configured "all" value (`*`, `ALL`) grants every station. A missing or malformed claim grants nothing.
+- Controllers receive a `StationScope` parameter through `StationScopeArgumentResolver`. `?stations=` narrows it to a subset; naming a station outside the token returns `403`.
+
+### Enforcement points
+
+| Path | Filter |
+|---|---|
+| `GET /api/events` (history) | SQL `stations && :scope` |
+| SSE replay | Same SQL on `findAfter` |
+| SSE live delivery | `SseHub.broadcast` queues an event only for clients whose scope overlaps `event.stations` |
+| `GET /api/flights` and flight writes | `route_stations && :scope`; create, update and delete require access to the flight's stations |
+| `GET /api/passengers` | Live flight's route, or the passenger segment's origin/destination after the flight row was deleted |
+
+The listener itself stays unscoped: it must see every event to decide who receives it.
+
+### Token lifetime and SSE
+
+The browser's `EventSource` cannot send headers, so the UI uses a fetch-based SSE client (`web/src/lib/sse-client.js`) that sends `Authorization` on every (re)connection. Each `SseClient` stores its JWT expiry; the heartbeat closes expired streams (`reason=token_expired`), and the browser reconnects with a fresh token from the SSO library. A `401` on any call hands control back to the auth layer, and a `403` stops reconnecting and explains why.
+
+### Development identity provider
+
+With the `dev` profile, `DevTokenConfiguration` trusts HS256 tokens signed with `app.security.dev.secret`, and `POST /api/dev/token` issues tokens for any name and set of stations. The tokens have the same shape as SSO tokens. This lets the UI, demos and Testcontainers tests run without an identity provider. It logs a warning at start-up and must never be enabled in a shared environment.
+
+### Plugging in an organisation's SSO
+
+1. **API:** set `SPRING_SECURITY_OAUTH2_RESOURCESERVER_JWT_ISSUER_URI` (and `..._AUDIENCES`), remove the `dev` profile, and set `STATIONS_CLAIM` if your claim has a different name or nesting.
+2. **UI:** build with `VITE_AUTH_MODE=sso` and define `window.flightSignalSso` (`isSignedIn`, `getAccessToken`, `signIn`, `signOut`) using MSAL, oidc-client-ts, Okta or similar. See `web/src/auth/providers/sso-provider.js`.
+3. **Edge:** add the identity provider's origins to the nginx Content-Security-Policy `connect-src`, and keep `Authorization` forwarding, which nginx does by default.
+
 ## Failure and recovery analysis
 
 No finite implementation can enumerate every infrastructure failure. The following matrix covers the meaningful failure modes in the current topology and code.
@@ -491,7 +537,7 @@ No finite implementation can enumerate every infrastructure failure. The followi
 | Flight is deleted after the manifest is loaded | The passenger foreign key becomes null, but copied flight identity remains searchable from the historical notification. | Handled by schema |
 | Passenger source application is late or unavailable | Flight notifications still work, but passenger search may be empty or stale. No freshness SLA or source reconciliation exists yet. | External dependency gap |
 | Passenger result exceeds 200 rows | The repository currently limits results to 200 without pagination. | Gap |
-| Passenger data is accessed by an unauthorized user | Authentication, authorization, audit logging, masking, and field-level access controls are not implemented. | Production blocker |
+| Passenger data is accessed by an unauthorized user | Every call needs a valid JWT, and passenger search is limited to the caller's stations. Audit logging, masking and field-level controls are not implemented yet. | Partial |
 | Invalid PostgreSQL notification payload | Invalid event IDs are ignored and logged. | Handled |
 | Malformed event JSON or incompatible schema | Classification can throw. The event is not marked delivered and the listener reconnects and retries it. There is no poison-event isolation yet. | Gap |
 | More than 500 events occur while a browser is offline | The server sends `reset` instead of replaying, and the browser reloads its newest history page. | Handled |
@@ -503,7 +549,7 @@ No finite implementation can enumerate every infrastructure failure. The followi
 | Concurrent transactions commit out of ID order | Replay and catch-up re-check a window of IDs below the cursor, and clients de-duplicate. Strict global ordering is still not guaranteed. | Mitigated |
 | Privileged session disables/bypasses triggers | No event is captured. Production roles must not be permitted to disable triggers or bypass them. | Operational control required |
 | Database schema changes | Versioned Flyway migrations run at start-up. Existing databases are baselined. | Handled |
-| Unauthorized API use | Authentication, authorization, row-level security, and rate limiting are not implemented. | Gap |
+| Unauthorized API use | Spring Security validates the bearer JWT on every `/api/**` call (401 otherwise), and data is filtered by the stations claim (403 when asking for others). Rate limiting belongs at the edge. | Mostly handled |
 | Monitoring failure | Actuator liveness and readiness probes, a listener health indicator, and Prometheus metrics for clients, broadcasts, delivery lag, reconnects, drops, and purges. Dashboards and alerts are still to be built. | Mostly handled |
 | Development port is occupied | `concurrently -k` stops Vite when the API process fails. | Handled |
 | Browser timezone differs from origin timezone | Current form conversion may create the wrong UTC instant from a local input. | Gap |
@@ -707,6 +753,24 @@ Extends Spring's `ResponseEntityExceptionHandler` and returns RFC 9457 `applicat
 - Malformed JSON, type mismatches, missing parameters, and unknown routes: handled by Spring with their proper status.
 - Anything unexpected: a generic `500` with the stack trace logged server-side only.
 
+### Security layer
+
+#### `SecurityConfig`
+
+Stateless resource-server filter chain: `/api/**` authenticated; health, info and Prometheus open; async and error dispatches permitted (the SSE response completes on an async dispatch); everything else denied. Also registers `StationScopeArgumentResolver`.
+
+#### `StationScope`, `StationScopeResolver`, `StationScopeArgumentResolver`
+
+Represent, derive (from JWT claims), and inject the stations a caller may see. `StationScope.permits()` is the single overlap check used by the SSE hub and the flight service.
+
+#### `MeController`
+
+`GET /api/me` returns the caller's name, stations and token expiry as the API sees them. The UI uses it instead of trusting the token in the browser.
+
+#### `DevTokenConfiguration`, `DevTokenIssuer`, `DevTokenController`
+
+The development-only HS256 identity provider described above.
+
 ### Passenger search layer
 
 #### `Passenger`
@@ -739,7 +803,11 @@ The UI is organised by responsibility:
 
 | Path | Responsibility |
 |---|---|
-| `src/api.js` | Fetch wrapper; surfaces the problem `detail` and HTTP status as an `ApiError` |
+| `src/api.js` | Fetch wrapper; adds the bearer token, surfaces the problem `detail` and HTTP status as an `ApiError`, reports 401s |
+| `src/auth/` | `AuthProvider` (user from `/api/me`), development and SSO providers, JWT helpers |
+| `src/lib/sse-client.js` | Fetch-based SSE client and `text/event-stream` parser (sends `Authorization`) |
+| `src/components/StationScopeBar.jsx`, `UserBadge.jsx`, `SignIn.jsx` | Station filter, signed-in user, development and SSO sign-in screens |
+| `src/components/Workspace.jsx` | Signed-in workspace, remounted when the user or station filter changes |
 | `src/config.js` | Feature flags (`SHOW_FLIGHT_OPERATIONS` from `VITE_SHOW_FLIGHT_OPERATIONS`) |
 | `src/hooks/useFlightEvents.js` | History loading, SSE lifecycle, reconnect, reset, de-duplication |
 | `src/lib/format.js` | Shared formatting (icons, flight codes, time zones, enums) |
@@ -834,7 +902,9 @@ The CI workflow runs backend `verify` (including Testcontainers), frontend lint,
 | Method | Endpoint | Purpose |
 |---|---|---|
 | `GET` | `/api/events?limit=30&before={eventId}` | Return keyset-paginated classified event history |
-| `GET` | `/api/events/stream?after={eventId}` | Open the SSE stream and replay events after a cursor |
+| `GET` | `/api/events/stream?after={eventId}&stations=SIN` | Open the SSE stream and replay events after a cursor, for the caller's stations |
+| `GET` | `/api/me` | Caller's name and stations as resolved from the JWT |
+| `POST` | `/api/dev/token` | Development profile only: issue a JWT `{name, stations}` |
 
 ### Passenger endpoint
 
@@ -928,7 +998,8 @@ make simulate
 | `FlightEventControllerTest` | Cursor resolution from `Last-Event-ID` and `after` |
 | `FlightServiceTest` | Normalisation, time-zone and route validation, PATCH semantics, version conflicts |
 | `PassengerServiceTest`, `PassengerRepositoryTest` | Filter normalisation and validation; index-friendly flight-code split |
-| `FlightSignalIT` (Testcontainers) | Flyway migrations on real PostgreSQL; end-to-end NOTIFY → SSE delivery; no replay without a cursor; `Last-Event-ID` replay; no-op update suppression; passenger search; problem details; retention; health and Prometheus endpoints |
+| `StationScopeTest`, `StationScopeResolverTest` | Overlap checks, narrowing and `403`; claim shapes (array, string, nested path, `*`), deny by default |
+| `FlightSignalIT` (Testcontainers) | 401 without a token; `/api/me`; each leg of QF1 delivered only to its own stations (SYD and SIN, or SIN and LHR; never AKL); a delayed first leg also alerting LHR, while its gate change does not; diversion reaching old and new stations; station-filtered history and replay; `403` narrowing; station-filtered passenger search; Flyway migrations on real PostgreSQL; end-to-end NOTIFY → SSE delivery; no replay without a cursor; `Last-Event-ID` replay; no-op update suppression; passenger search; problem details; retention; health and Prometheus endpoints |
 | Web (Vitest + Testing Library) | `useFlightEvents` (cursor, history retry, silent de-duplication, manual reconnect, reset, cleanup); notification center behaviour and accessibility; formatting and filter helpers |
 | CI simulator job | Migrations, seeds, and two simulator cycles against PostgreSQL, with assertions on flights, passengers, and events |
 
@@ -938,11 +1009,11 @@ Further ideas: browser end-to-end tests (Playwright) and load tests for many con
 
 ## Production hardening recommendations
 
-Implemented in this version: Flyway migrations, event retention, paged listener catch-up, a replay limit with reset, slow-consumer isolation, a connection limit, a half-open connection probe, Actuator health groups, Prometheus metrics, structured JSON logs, RFC 9457 errors, graceful shutdown, container images, CI, and Testcontainers integration tests.
+Implemented in this version: JWT authentication with station-scoped delivery, Flyway migrations, event retention, paged listener catch-up, a replay limit with reset, slow-consumer isolation, a connection limit, a half-open connection probe, Actuator health groups, Prometheus metrics, structured JSON logs, RFC 9457 errors, graceful shutdown, container images, CI, and Testcontainers integration tests.
 
 Still required before real use:
 
-1. Authentication, role-based authorization, and audience routing (today every connected browser receives every event).
+1. Finer-grained authorization beyond station scope (e.g. read-only versus flight-editing roles from additional claims).
 2. Passenger data protection: data minimisation, encryption, field-level access, access auditing, and retention rules.
 3. Rate limiting at the edge.
 4. PostgreSQL backup, restore, high availability, and least-privilege roles that cannot disable triggers.
@@ -992,6 +1063,9 @@ For development, the `R__2_seed_passengers.sql` seed produces 20 sample passenge
 | React application | `web/src/App.jsx` |
 | React event hook | `web/src/hooks/useFlightEvents.js` |
 | UI components | `web/src/components/` |
+| Security (JWT, station scope, dev issuer) | `server/src/main/java/com/example/flights/security/` |
+| Station routing migration | `server/src/main/resources/db/migration/V3__station_routing.sql` |
+| UI auth layer and SSE client | `web/src/auth/`, `web/src/lib/sse-client.js` |
 | Hidden flight operations | `web/src/features/flight-operations/FlightOperations.jsx` |
 | Runtime configuration | `server/src/main/resources/application.yml` |
 | Container images | `server/Dockerfile`, `web/Dockerfile`, `web/nginx/` |

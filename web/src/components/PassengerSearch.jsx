@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from 'react';
 import { api } from '../api.js';
 import { displayEnum, eventIcon, flightCode, formatEventTime } from '../lib/format.js';
 import { emptyFilters, filtersForEvent, passengerQuery } from '../lib/passenger-filters.js';
+import { routeLabel } from '../lib/stations.js';
 
 let nextQueryId = 1;
 
@@ -59,7 +60,7 @@ export function PassengerSearch({ notification, seedEvent }) {
 
   const route = useMemo(() => {
     const flight = notification?.flight;
-    return flight ? flight.originAirport + ' → ' + flight.destinationAirport : '';
+    return routeLabel(flight);
   }, [notification]);
 
   function update(field, value) {

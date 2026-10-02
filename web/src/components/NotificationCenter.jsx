@@ -1,5 +1,6 @@
 import { useEffect, useRef } from 'react';
 import { eventIcon, flightCode, formatEventTime } from '../lib/format.js';
+import { routeLabel } from '../lib/stations.js';
 
 export function NotificationCenter({
   open,
@@ -119,6 +120,9 @@ export function NotificationCenter({
                     <span className="notification-item__content">
                       <span className="notification-item__meta">
                         <strong>{flightCode(event.flight) || 'Flight update'}</strong>
+                        {event.flight && (
+                          <span className="notification-item__route">{routeLabel(event.flight)}</span>
+                        )}
                         <time dateTime={event.occurredAt}>
                           {formatEventTime(event.occurredAt)}
                         </time>
