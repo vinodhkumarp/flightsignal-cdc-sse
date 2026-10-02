@@ -1,0 +1,124 @@
+server:
+  port: ${SERVER_PORT:3101}
+  shutdown: graceful
+  # SSE responses must be streamed unbuffered and uncompressed.
+  compression:
+    enabled: false
+  forward-headers-strategy: framework
+
+spring:
+  application:
+    name: flight-notification-service
+  lifecycle:
+    timeout-per-shutdown-phase: 20s
+  datasource:
+    url: ${SPRING_DATASOURCE_URL:jdbc:postgresql://localhost:5433/flights}
+    username: ${SPRING_DATASOURCE_USERNAME:flights}
+    password: ${SPRING_DATASOURCE_PASSWORD:flights}
+    hikari:
+      maximum-pool-size: ${DB_POOL_SIZE:10}
+      minimum-idle: 2
+      connection-timeout: 5000
+  flyway:
+    locations: classpath:db/migration
+    # Databases created by the original docker-entrypoint scripts already
+    # contain the schema; baseline them at 0 so the idempotent V1/V2 run.
+    baseline-on-migrate: true
+    baseline-version: 0
+  threads:
+    virtual:
+      enabled: true
+  main:
+    keep-alive: true
+  mvc:
+    problemdetails:
+      enabled: true
+  jackson:
+    datatype:
+      datetime:
+        write-dates-as-timestamps: false
+
+app:
+  sse:
+    heartbeat: 20s
+    timeout: 30m
+    reconnect-delay: 3s
+    max-clients: ${SSE_MAX_CLIENTS:500}
+    client-queue-capacity: 256
+    replay-limit: 500
+    replay-safety-window: 20
+  listener:
+    poll-timeout: 5s
+    health-check-interval: 15s
+    socket-timeout: 30s
+    initial-backoff: 1s
+    max-backoff: 30s
+    reconcile-window: 500
+    reconcile-page-size: 500
+  events:
+    retention:
+      enabled: true
+      period: ${EVENT_RETENTION:30d}
+      cron: "0 17 3 * * *"
+      batch-size: 5000
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,prometheus,metrics
+  endpoint:
+    health:
+      probes:
+        enabled: true
+      show-details: ${HEALTH_DETAILS:when-authorized}
+      group:
+        readiness:
+          include: readinessState,db,flightListener
+  info:
+    env:
+      enabled: true
+    java:
+      enabled: true
+  metrics:
+    tags:
+      application: ${spring.application.name}
+
+info:
+  app:
+    name: FlightSignal
+    description: Real-time flight disruption and passenger-care service
+
+logging:
+  level:
+    com.example.flights: INFO
+
+---
+# Local development: seed demo flights/passengers and show health details.
+spring:
+  config:
+    activate:
+      on-profile: dev
+  flyway:
+    locations: classpath:db/migration,classpath:db/seed
+
+management:
+  endpoint:
+    health:
+      show-details: always
+
+logging:
+  level:
+    com.example.flights: DEBUG
+
+---
+# Container / production-like runtime: JSON logs for log aggregation.
+spring:
+  config:
+    activate:
+      on-profile: prod
+
+logging:
+  structured:
+    format:
+      console: ecs

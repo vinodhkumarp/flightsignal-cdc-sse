@@ -1,0 +1,46 @@
+# Dependencies and generated builds
+node_modules/
+web/dist/
+dist/
+server/target/
+target/
+coverage/
+**/.mvn/wrapper/maven-wrapper.jar
+
+# Local configuration and secrets
+.env
+.env.*
+!.env.example
+*.local
+*.pem
+*.key
+*.p12
+*.jks
+
+# Logs and runtime files
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+*.pid
+
+# Editors and IDEs
+.idea/
+.vscode/
+*.iml
+.classpath
+.project
+.settings/
+*.swp
+*.swo
+
+# Operating-system metadata
+.DS_Store
+._*
+Thumbs.db
+
+# Test and tool caches
+.cache/
+.eslintcache
+.vite/
+.pytest_cache/

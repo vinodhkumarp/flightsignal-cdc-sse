@@ -1,0 +1,90 @@
+# FlightSignal local stack.
+#
+#   docker compose up -d postgres                          # database only (make dev)
+#   docker compose --profile app up --build -d             # + API + web UI (make up)
+#   docker compose --profile app --profile sim up --build  # + continuous simulator
+#
+# Settings come from .env (copy .env.example). Defaults are for local use only.
+
+name: flightsignal
+
+x-db-env: &db-env
+  POSTGRES_DB: ${POSTGRES_DB:-flights}
+  POSTGRES_USER: ${POSTGRES_USER:-flights}
+  POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-flights}
+
+services:
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      <<: *db-env
+    ports:
+      - "${POSTGRES_PORT:-5433}:5432"
+    volumes:
+      - flight-postgres-data:/var/lib/postgresql/data
+      # Read-only access to the simulator and seed SQL for `make simulate` / `make db-seed`.
+      - ./db:/workspace/db:ro
+      - ./server/src/main/resources/db:/workspace/migrations:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+    restart: unless-stopped
+
+  api:
+    profiles: ["app"]
+    build:
+      context: ./server
+    image: flightsignal-api:local
+    environment:
+      SPRING_PROFILES_ACTIVE: ${API_PROFILES:-prod,dev}
+      SPRING_DATASOURCE_URL: jdbc:postgresql://postgres:5432/${POSTGRES_DB:-flights}
+      SPRING_DATASOURCE_USERNAME: ${POSTGRES_USER:-flights}
+      SPRING_DATASOURCE_PASSWORD: ${POSTGRES_PASSWORD:-flights}
+      EVENT_RETENTION: ${EVENT_RETENTION:-30d}
+    ports:
+      - "${API_PORT:-3101}:3101"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+    stop_grace_period: 30s
+
+  web:
+    profiles: ["app"]
+    build:
+      context: .
+      dockerfile: web/Dockerfile
+      args:
+        VITE_SHOW_FLIGHT_OPERATIONS: ${VITE_SHOW_FLIGHT_OPERATIONS:-false}
+    image: flightsignal-web:local
+    environment:
+      API_UPSTREAM: http://api:3101
+    ports:
+      - "${WEB_PORT:-8080}:8080"
+    depends_on:
+      api:
+        condition: service_healthy
+    restart: unless-stopped
+
+  simulator:
+    profiles: ["sim"]
+    image: postgres:17-alpine
+    environment:
+      PGPASSWORD: ${POSTGRES_PASSWORD:-flights}
+      PSQL: psql -h postgres -U ${POSTGRES_USER:-flights} -d ${POSTGRES_DB:-flights}
+      SIM_STEP_SECONDS: ${SIM_STEP_SECONDS:-3}
+      SIM_PAUSE_SECONDS: ${SIM_PAUSE_SECONDS:-2}
+      SIM_PASSENGERS: ${SIM_PASSENGERS:-24}
+    volumes:
+      - ./db:/workspace/db:ro
+      - ./scripts:/workspace/scripts:ro
+    entrypoint: ["sh", "/workspace/scripts/simulate.sh"]
+    depends_on:
+      api:
+        condition: service_healthy
+    restart: on-failure
+
+volumes:
+  flight-postgres-data:

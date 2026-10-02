@@ -1,0 +1,12 @@
+# Root build context (used by web/Dockerfile).
+**/node_modules
+web/dist
+server/
+db/
+docs/
+.git
+.github
+.idea
+.env
+.env.*
+*.log
