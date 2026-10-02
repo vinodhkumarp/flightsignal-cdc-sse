@@ -144,7 +144,7 @@ jobs:
           echo "web=ghcr.io/${owner}/flightsignal-web" >> "$GITHUB_OUTPUT"
 
       - name: Build API image
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@v7
         with:
           context: server
           push: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
@@ -155,7 +155,7 @@ jobs:
           cache-to: type=gha,mode=max,scope=api
 
       - name: Build web image
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@v7
         with:
           context: .
           file: web/Dockerfile
